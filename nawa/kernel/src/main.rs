@@ -15,6 +15,7 @@
 extern crate alloc;
 
 mod banner;
+mod logo;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -70,10 +71,19 @@ fn kmain(boot: BootInfo) -> ! {
         fb.clear(0x0b, 0x10, 0x21); // ink-dark blue
         let art = banner::banner();
         let scale = if fb.height >= art.height * 3 { 2 } else { 1 };
+        const GAP: usize = 56;
+        let stack = logo::MARK_HEIGHT + GAP + art.height * scale;
         // checked_sub: tiny framebuffers must degrade, not underflow.
-        if let Some(margin) = fb.height.checked_sub(art.height * scale) {
-            fb.blit_centered(&art, margin / 2, scale, (0xf5, 0xf0, 0xe6)); // warm white
-            let _ = writeln!(out, "fb: {}x{} banner drawn — i3mel", fb.width, fb.height);
+        if let Some(margin) = fb.height.checked_sub(stack) {
+            // The mark — three petals orbiting a center, the O in i3mlOS.
+            let mark_top = margin / 2;
+            let mark_left = (fb.width.saturating_sub(logo::MARK_WIDTH)) / 2;
+            for petal in logo::mark() {
+                fb.blit(&petal.bitmap, mark_left + petal.dx, mark_top + petal.dy, 1, petal.color);
+            }
+            let banner_top = mark_top + logo::MARK_HEIGHT + GAP;
+            fb.blit_centered(&art, banner_top, scale, (0xf5, 0xf0, 0xe6)); // warm white
+            let _ = writeln!(out, "fb: {}x{} mark + banner drawn — i3mlOS", fb.width, fb.height);
         }
     }
 

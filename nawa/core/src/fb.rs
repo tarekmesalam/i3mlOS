@@ -71,21 +71,34 @@ impl Framebuffer {
     /// at the given vertical position. Set bits get `fg`; clear bits are left
     /// untouched (transparent background).
     pub fn blit_centered(&self, bitmap: &Bitmap1Bpp, top: usize, scale: usize, fg: (u8, u8, u8)) {
+        let Some(out_width) = bitmap.width.checked_mul(scale) else {
+            return;
+        };
+        if out_width > self.width {
+            return;
+        }
+        self.blit(bitmap, (self.width - out_width) / 2, top, scale, fg);
+    }
+
+    /// Blit a 1-bpp bitmap at an explicit position. Set bits get `fg`; clear
+    /// bits are left untouched (transparent background).
+    pub fn blit(&self, bitmap: &Bitmap1Bpp, left: usize, top: usize, scale: usize, fg: (u8, u8, u8)) {
         let pixel = self.encode(fg.0, fg.1, fg.2);
-        // Checked arithmetic: a hostile/huge bitmap or a wild `top` must fail
-        // closed, not wrap into "in bounds" (review finding, M0).
+        // Checked arithmetic: a hostile/huge bitmap or wild coordinates must
+        // fail closed, not wrap into "in bounds" (review finding, M0).
         let (Some(out_width), Some(out_height)) =
             (bitmap.width.checked_mul(scale), bitmap.height.checked_mul(scale))
         else {
             return;
         };
-        let Some(bottom) = top.checked_add(out_height) else {
+        let (Some(right), Some(bottom)) =
+            (left.checked_add(out_width), top.checked_add(out_height))
+        else {
             return;
         };
-        if out_width > self.width || bottom > self.height {
+        if right > self.width || bottom > self.height {
             return;
         }
-        let left = (self.width - out_width) / 2;
         let bytes_per_row = bitmap.width.div_ceil(8);
         for row in 0..bitmap.height {
             for column in 0..bitmap.width {

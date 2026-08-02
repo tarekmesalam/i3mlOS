@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="i3mlOS" width="440">
+  </picture>
+</p>
+
 # i3mlOS — إعمل
 
 > **"Don't operate your computer. Tell it."** — *«ما تشغّلش الكمبيوتر… قوله يعمل إيه.»*
@@ -21,8 +28,16 @@
 
 ## Status | الحالة
 
-📐 **Planning complete — Phase 0 next:** a UEFI-app kernel printing `hello from the i3ml kernel` in QEMU, booted by CI on every commit.
-التخطيط خلص — الخطوة الجاية: نواة UEFI بتطبع أول سطر في QEMU، والـ CI بيقلعها على كل commit.
+🟢 **M0 complete.** The kernel boots on QEMU/OVMF, leaves the firmware behind
+(`ExitBootServices`), runs on its own GDT/TSS/IDT with exception handlers,
+manages memory with its own frame allocator and heap, and paints its boot
+screen — CI proves every step on every commit.
+
+<p align="center">
+  <img src="assets/bootscreen.png" alt="i3mlOS boot screen: the three-petal mark above إعمل" width="640">
+</p>
+
+<p align="center"><em>The actual framebuffer of the NAWA kernel, drawn by its own code — no firmware, no Linux, no libraries.</em></p>
 
 ## Documents | المستندات
 
