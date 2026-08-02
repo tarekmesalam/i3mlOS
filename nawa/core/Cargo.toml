@@ -1,0 +1,9 @@
+[package]
+name = "nawa-core"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "NAWA trusted core — the ONLY crate in the tree allowed to contain `unsafe` (framekernel rule, enforced by `cargo xtask check`)"
+
+[lib]
+name = "nawa_core"

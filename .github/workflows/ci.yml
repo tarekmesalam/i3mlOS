@@ -1,0 +1,20 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  boot:
+    name: framekernel check + QEMU boot test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU + OVMF
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+      - name: Install Rust (rust-toolchain.toml pins nightly + UEFI target)
+        run: rustup show
+      - name: Framekernel rule — unsafe only in nawa/core
+        run: cargo xtask check
+      - name: Boot the kernel in QEMU and assert the serial hello
+        run: cargo xtask test

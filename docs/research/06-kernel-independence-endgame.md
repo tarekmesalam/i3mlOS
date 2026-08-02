@@ -1,0 +1,45 @@
+# Kernel-Independence Endgame Brief — from "Linux inside" to "no Linux at all"
+
+**Bottom line:** the swap is achievable but only as a decade-scale, staged demotion of Linux — from *the* kernel, to *a hardened engine*, to *an unprivileged driver domain*, to *gone on specific SKUs*. The base rates below say a from-scratch general-purpose kernel is a 10–15-year project even for Google-scale teams; what makes the endgame credible for a small company is (a) keeping i3mlOS's real ABI at the AMAN/MCP layer so the kernel is never the contract, and (b) the arrival of Linux-ABI-compatible Rust kernels that let userspace survive the swap unchanged.
+
+## 1. Redox OS — the from-scratch base rate
+
+Started April 2015 by Jeremy Soller (System76 principal engineer); a microkernel OS in Rust with its own libc (relibc). Eleven years in, with a small donations/NLnet-funded team plus tens of volunteers, the [2025/26 development priorities](https://www.redox-os.org/news/development-priorities-2025-09/) target is telling: *"at least a few people doing development on real hardware before the end of 2026"* — i.e., self-hosting on a handful of laptops with wired Ethernet is the decade-eleven milestone. Its [own Intel graphics driver](https://www.phoronix.com/news/Redox-OS-Own-Intel-GPU-Driver) is currently mode-setting only, no acceleration; wins in 2026 monthlies are things like USB gamepads and COSMIC apps booting on one specific IdeaPad. **Base rate: ~10 years of sustained expert effort buys "developers can almost dogfood on blessed hardware."** The bottleneck is never the kernel core — it's drivers and the long tail of hardware.
+
+## 2. Fuchsia — the kernel-swap ambition that stalled
+
+Fuchsia (public 2016, Zircon microkernel, team in the hundreds) was explicitly aimed at swapping the kernel under Chromebooks and phones. Reality: it shipped on exactly one product class — the [Nest Hub, 2021](https://en.wikipedia.org/wiki/Fuchsia_(operating_system)) (still maintained; F30 released April 2026). The Android-device swap ("device/google/fuchsia") [stalled in 2021 and was deleted in 2022](https://9to5google.com/2022/07/15/android-removes-fuchsia-code-starnix/); the January 2023 layoffs hit the Fuchsia org hard. Two pivots survived, and both are lessons: **Starnix**, a Linux-syscall-compatibility layer on Zircon — even Google concluded the Linux *ABI*, not Linux code, is the immovable object — and **[microfuchsia](https://www.androidauthority.com/microfuchsia-on-android-3457788/)**, Fuchsia arriving on Android devices *inside a pKVM virtual machine* rather than replacing the kernel. **Lessons: (1) never swap kernel + product + ecosystem simultaneously; (2) enter via VMs, where hardware is virtio and drivers are solved; (3) compatibility layers beat evangelism.**
+
+## 3. Asterinas and the framekernel path — the credible swap mechanism
+
+[Asterinas](https://github.com/asterinas/asterinas) (Ant Group + universities, ~2022) is the most important development for our endgame: a **Linux ABI-compatible framekernel** in Rust — a single-address-space kernel where only a small privileged framework (OSTD, ~14% of code) may use `unsafe`, and all OS services are safe Rust ([USENIX ATC '25 paper](https://www.usenix.org/conference/atc25/presentation/peng-yuke); [LWN coverage](https://lwn.net/Articles/1022920/)). Status 2025–26: ~206–210 of ~368 Linux syscalls, Linux-comparable performance on benchmarks, x86-64 + RISC-V, Intel TDX guest support, and a [roadmap](https://asterinas.github.io/book/kernel/roadmap.html) deliberately targeting **VMs, confidential computing, and container/VM hosts** — i.e., virtio-only hardware — not laptops. Related efforts (Starnix itself; historical gVisor-style ABI reimplementations) confirm the pattern. **Verdict: a drop-in kernel swap under an unchanged Linux userspace is credible in virtualized/server environments on a ~3–6 year horizon (pilotable now for narrow workloads), and on bare-metal laptops only after someone solves drivers — which is section 4.**
+
+## 4. Driver reuse without rewriting drivers
+
+Three proven strategies, all converging on the same shape:
+- **seL4 driver VMs / LionsOS:** UNSW's [LionsOS](https://arxiv.org/pdf/2501.06234) runs an unmodified Linux driver inside a minimal Linux guest VM; a tiny UIO shim exports the device over sDDF/virtio queues to native components. Native seL4 [VMM libraries](https://docs.sel4.systems/projects/virtualization/docs/libsel4vmm.html) provide virtio-net/console/block plumbing.
+- **Genode:** two decades of DDE (porting Linux driver code into isolated user-level components with an emulation layer) plus running whole driver subsystems and VirtualBox in VMs; Sculpt OS is daily-driven by Genode Labs staff — proof the "multiplexed driver islands" architecture works, and also proof it stays niche without an app story.
+- **Virtio as the narrow waist:** microfuchsia-on-pKVM and Asterinas-in-TDX both work *because* virtio reduces "all hardware" to ~a dozen stable, OASIS-standardized device contracts.
+
+**Strategy for i3mlOS: make virtio our internal driver ABI from Phase 2.** Our bootc VM appliance already gives us this for free. On bare metal later, Linux is demoted to an unprivileged driver VM feeding virtio queues — "no Linux in the TCB" years before "no Linux code at all."
+
+## 5. Own the contract — what forecloses the swap
+
+Our real ABI is AMAN capability calls, MCP, SIJIL's schema, DHAKIRA's file format, and the i3ml CLI/shell protocol. POSIX is plumbing we consume, never a promise we make. Audit of current plan (MASTER_PLAN.md §3):
+
+**Harmless (kernel-portable or swappable):** glibc vs musl (invisible if agents never see libc; prefer musl/static — eases relibc/Asterinas targets); Wayland/Smithay (protocol is kernel-agnostic; Redox runs Wayland-ish compositors); MCP/gRPC/SQLite/OTel; OCI *images* (runtime is replaceable: runc→youki/Kata/microVMs).
+**Manageable if wrapped:** systemd scopes/cgroups for cost-groups, btrfs snapshots for undo, bubblewrap/Landlock/namespaces for sandboxing — all Linux-only, so in i3mld they must live behind Rust traits (`Isolation`, `Snapshot`, `Scheduler`) with the *semantics* (two-class undo, attenuation) defined by us, not by btrfs.
+**Foreclosing — avoid:** exposing systemd units, cgroup paths, eBPF hooks, `/proc`, or kernel-module extension points to third-party agents/tools; promising POSIX shell access as a stable user surface; letting the MCP ecosystem bind to Linux paths instead of AMAN capability names.
+
+## 6. Staged roadmap (years, gates, team)
+
+| Stage | Years | What | Go/no-go to advance | OS-team size |
+|---|---|---|---|---|
+| 1. Invisible Linux | 0–2 | Fedora bootc appliance; Linux fully stock | 1k WAU gate (existing); AMAN spec adopted by ≥3 external tools | 0 kernel people |
+| 2. Hardened engine | 2–4 | Minimal kernel config, lockdown, module allowlist; all i3mld deps behind traits; virtio-only device model in VM SKU; risky drivers (Wi-Fi, USB) into driver VMs on one reference bare-metal box | Revenue funds dedicated platform team; driver-VM overhead <10% | 3–8 |
+| 3. Rust ingress | 4–7 | Asterinas (or successor) pilots as **guest** kernel for agent sandboxes/confidential VMs server-side; contribute syscalls we need upstream; native Rust virtio/NVMe/NIC drivers | Asterinas-class kernel runs our full userspace in CI; ≥1 production workload class on it for 6 months | 10–25 |
+| 4. The swap | 7–10+ | Server/appliance SKUs boot Rust kernel natively, Linux only as unprivileged driver VM; then per-device-class elimination. Reference-hardware laptop (System76-style partnership) last | Kernel CVE/maintenance cost of dual-track < single-track; hardware partner signed | 25–60 |
+
+**Honesty clause:** "no Linux code at all" on arbitrary consumer laptops is a 15-year statement; on our own appliance and cloud SKUs it is a 7–10-year statement. Every earlier stage is independently valuable, which is the only reason this plan survives contact with the Redox and Fuchsia base rates.
+
+Sources: [Redox priorities 2025/26](https://www.redox-os.org/news/development-priorities-2025-09/) · [Redox monthlies 2026](https://www.redox-os.org/news/) · [Phoronix: Redox Intel GPU driver](https://www.phoronix.com/news/Redox-OS-Own-Intel-GPU-Driver) · [Fuchsia (Wikipedia)](https://en.wikipedia.org/wiki/Fuchsia_(operating_system)) · [9to5Google: Starnix](https://9to5google.com/2022/07/15/android-removes-fuchsia-code-starnix/) · [Android Authority: microfuchsia](https://www.androidauthority.com/microfuchsia-on-android-3457788/) · [Asterinas GitHub](https://github.com/asterinas/asterinas) · [Asterinas ATC '25](https://www.usenix.org/conference/atc25/presentation/peng-yuke) · [LWN on Asterinas](https://lwn.net/Articles/1022920/) · [Asterinas roadmap](https://asterinas.github.io/book/kernel/roadmap.html) · [LionsOS paper](https://arxiv.org/pdf/2501.06234) · [seL4 VMM docs](https://docs.sel4.systems/projects/virtualization/docs/libsel4vmm.html) · [Genode DDE](https://genode.org/documentation/api/dde_kit_index)

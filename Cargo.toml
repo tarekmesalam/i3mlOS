@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["nawa/core", "nawa/kernel", "xtask"]
+# Plain `cargo build`/`cargo test` at the root touches host tooling only;
+# the kernel is always built for its UEFI target via `cargo xtask`.
+default-members = ["xtask"]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/i3mlos/i3ml"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
