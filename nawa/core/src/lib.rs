@@ -9,15 +9,30 @@
 //! HAL trait when the aarch64 port starts.
 
 #![no_std]
+#![feature(abi_x86_interrupt)]
 
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod arch;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+mod cell;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod entry;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+pub mod fb;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+mod gdt;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+pub mod heap;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+mod idt;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+pub mod mem;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 mod panic;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod qemu;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+pub mod selftest;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod serial;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]

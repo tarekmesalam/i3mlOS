@@ -28,6 +28,14 @@ pub(crate) fn inb(port: u16) -> u8 {
     value
 }
 
+/// Mask maskable interrupts. Exceptions still fire — that is the point:
+/// nothing preempts bring-up, but bugs still land in our IDT.
+pub(crate) fn disable_interrupts() {
+    unsafe {
+        asm!("cli", options(nomem, nostack));
+    }
+}
+
 /// Halt the CPU forever. The kernel's terminal state until there is a scheduler.
 pub fn halt_forever() -> ! {
     loop {

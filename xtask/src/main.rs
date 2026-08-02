@@ -16,6 +16,14 @@ use std::{env, fs, io::Read, thread};
 
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const HELLO_LINE: &str = "hello from the i3ml kernel";
+/// Every marker must appear on serial for the boot test to pass.
+const MARKERS: [&str; 5] = [
+    HELLO_LINE,
+    "nawa: exit_boot_services ok",
+    "int3: breakpoint handled",
+    "heap: ok",
+    "MiB usable",
+];
 /// isa-debug-exit: (0x10 << 1) | 1 — must match nawa_core::qemu::EXIT_SUCCESS.
 const QEMU_SUCCESS_STATUS: i32 = 33;
 const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -160,13 +168,15 @@ fn test() -> Result<(), String> {
     print!("{serial}");
     println!("--------------");
 
-    if !serial.contains(HELLO_LINE) {
-        return Err(format!("serial output missing \"{HELLO_LINE}\""));
+    for marker in MARKERS {
+        if !serial.contains(marker) {
+            return Err(format!("serial output missing \"{marker}\""));
+        }
     }
     if status.code() != Some(QEMU_SUCCESS_STATUS) {
         return Err(format!("expected qemu exit status {QEMU_SUCCESS_STATUS}, got {status}"));
     }
-    println!("BOOT TEST OK: found \"{HELLO_LINE}\", clean exit ({QEMU_SUCCESS_STATUS})");
+    println!("BOOT TEST OK: all {} markers found, clean exit ({QEMU_SUCCESS_STATUS})", MARKERS.len());
     Ok(())
 }
 
