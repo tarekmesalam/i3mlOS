@@ -114,16 +114,31 @@ fn find_firmware() -> Result<Firmware, String> {
     Err("UEFI firmware not found; install qemu (brew) or ovmf (apt), or set I3ML_OVMF_CODE/I3ML_OVMF_VARS".into())
 }
 
+/// CPU models the boot test sweeps. Both APIC access modes must work: real
+/// hardware and modern QEMU offer x2APIC, but plenty of environments (older
+/// QEMU builds, some CI images) expose only xAPIC MMIO — a path that shipped
+/// once without coverage and broke CI, so it is a permanent test dimension.
+const TEST_CPUS: [(&str, &str); 2] = [("x2apic", "max"), ("xapic", "max,-x2apic")];
+
 fn qemu_command(esp: &Path, headless: bool, testing: bool) -> Result<Command, String> {
+    qemu_command_with_cpu(esp, headless, testing, "max")
+}
+
+fn qemu_command_with_cpu(
+    esp: &Path,
+    headless: bool,
+    testing: bool,
+    cpu: &str,
+) -> Result<Command, String> {
     let firmware = find_firmware()?;
     // Vars flash must be writable — give QEMU a scratch copy.
     let vars_copy = repo_root().join("target").join("ovmf-vars.fd");
     fs::copy(&firmware.vars, &vars_copy).map_err(|e| format!("copy vars: {e}"))?;
 
     let mut qemu = Command::new("qemu-system-x86_64");
-    // `-cpu max`: the default QEMU CPU model advertises neither x2APIC nor a
-    // TSC-deadline timer, so the kernel would fall back to running untimed.
-    qemu.args(["-machine", "q35", "-cpu", "max", "-m", "256M", "-nic", "none", "-serial", "stdio"]);
+    // The default QEMU CPU model advertises no APIC timer features at all, so
+    // the kernel would fall back to running untimed; `max` turns them on.
+    qemu.args(["-machine", "q35", "-cpu", cpu, "-m", "256M", "-nic", "none", "-serial", "stdio"]);
     qemu.arg("-drive").arg(format!("if=pflash,format=raw,readonly=on,file={}", firmware.code.display()));
     qemu.arg("-drive").arg(format!("if=pflash,format=raw,file={}", vars_copy.display()));
     qemu.arg("-drive").arg(format!("format=raw,file=fat:rw:{}", esp.display()));
@@ -147,7 +162,16 @@ fn run(gui: bool) -> Result<(), String> {
 
 fn test() -> Result<(), String> {
     let esp = image()?;
-    let mut qemu = qemu_command(&esp, true, true)?;
+    for (name, cpu) in TEST_CPUS {
+        println!("=== boot test: {name} ({cpu}) ===");
+        boot_once(&esp, cpu)?;
+    }
+    println!("BOOT TEST OK: all {} markers on {} CPU models", MARKERS.len(), TEST_CPUS.len());
+    Ok(())
+}
+
+fn boot_once(esp: &Path, cpu: &str) -> Result<(), String> {
+    let mut qemu = qemu_command_with_cpu(esp, true, true, cpu)?;
     qemu.stdout(Stdio::piped()).stderr(Stdio::inherit()).stdin(Stdio::null());
 
     let start = Instant::now();
@@ -178,13 +202,13 @@ fn test() -> Result<(), String> {
 
     for marker in MARKERS {
         if !serial.contains(marker) {
-            return Err(format!("serial output missing \"{marker}\""));
+            return Err(format!("[{cpu}] serial output missing \"{marker}\""));
         }
     }
     if status.code() != Some(QEMU_SUCCESS_STATUS) {
-        return Err(format!("expected qemu exit status {QEMU_SUCCESS_STATUS}, got {status}"));
+        return Err(format!("[{cpu}] expected qemu exit status {QEMU_SUCCESS_STATUS}, got {status}"));
     }
-    println!("BOOT TEST OK: all {} markers found, clean exit ({QEMU_SUCCESS_STATUS})", MARKERS.len());
+    println!("  ok: all {} markers found, clean exit ({QEMU_SUCCESS_STATUS})", MARKERS.len());
     Ok(())
 }
 

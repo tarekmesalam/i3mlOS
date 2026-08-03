@@ -1,10 +1,15 @@
-//! Local APIC in x2APIC mode + TSC-deadline timer. This is the kernel's
-//! heartbeat: the first thing that can interrupt an agent, and the clock
-//! every SIJIL entry and budget deadline is measured against.
+//! The local APIC — the kernel's heartbeat: the first thing that can
+//! interrupt an agent, and the clock every SIJIL entry and budget deadline is
+//! measured against.
 //!
-//! x2APIC over xAPIC deliberately: MSR access instead of MMIO means no page
-//! mapping is needed while we still run on the firmware's tables, and it is
-//! the mode a modern machine (and Firecracker) boots with anyway.
+//! Both access modes are supported, because "works on my emulator" is not a
+//! design: **xAPIC** (MMIO at the base the firmware left in IA32_APIC_BASE)
+//! is the universal baseline present on every x86_64 machine and every QEMU
+//! build; **x2APIC** (MSRs, no mapping needed) is used when the CPU offers
+//! it. Register offsets are shared — an x2APIC MSR is `0x800 + (offset >> 4)`.
+//!
+//! Likewise two timer modes: TSC-deadline where available, and the APIC's own
+//! periodic mode everywhere else.
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -14,15 +19,50 @@ use crate::serial;
 const IA32_APIC_BASE: u32 = 0x1b;
 const APIC_BASE_ENABLE: u64 = 1 << 11;
 const APIC_BASE_X2APIC: u64 = 1 << 10;
+const APIC_BASE_ADDRESS_MASK: u64 = 0xf_ffff_f000;
 
-// x2APIC MSRs (xAPIC MMIO offset >> 4 | 0x800).
-const X2APIC_SIVR: u32 = 0x80f; // spurious interrupt vector
-const X2APIC_EOI: u32 = 0x80b;
-const X2APIC_LVT_TIMER: u32 = 0x832;
-const X2APIC_INITIAL_COUNT: u32 = 0x838;
-const X2APIC_CURRENT_COUNT: u32 = 0x839;
-const X2APIC_DIVIDE_CONFIG: u32 = 0x83e;
+// xAPIC MMIO offsets (SDM vol. 3, table 10-1).
+const REGISTER_EOI: u32 = 0xb0;
+const REGISTER_SIVR: u32 = 0xf0;
+const REGISTER_LVT_TIMER: u32 = 0x320;
+const REGISTER_INITIAL_COUNT: u32 = 0x380;
+const REGISTER_CURRENT_COUNT: u32 = 0x390;
+const REGISTER_DIVIDE_CONFIG: u32 = 0x3e0;
+
 const X2APIC_TSC_DEADLINE: u32 = 0x6e0;
+
+/// 0 = uninitialized, 1 = xAPIC (MMIO), 2 = x2APIC (MSR).
+static MODE: AtomicU64 = AtomicU64::new(0);
+/// xAPIC MMIO base, from IA32_APIC_BASE.
+static MMIO_BASE: AtomicU64 = AtomicU64::new(0);
+
+const MODE_XAPIC: u64 = 1;
+const MODE_X2APIC: u64 = 2;
+
+/// Write an APIC register by its xAPIC offset, in whichever mode is active.
+fn write_register(offset: u32, value: u64) {
+    match MODE.load(Ordering::Relaxed) {
+        MODE_X2APIC => write_msr(0x800 + (offset >> 4), value),
+        MODE_XAPIC => {
+            let address = MMIO_BASE.load(Ordering::Relaxed) + offset as u64;
+            unsafe {
+                (address as *mut u32).write_volatile(value as u32);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn read_register(offset: u32) -> u64 {
+    match MODE.load(Ordering::Relaxed) {
+        MODE_X2APIC => read_msr(0x800 + (offset >> 4)),
+        MODE_XAPIC => {
+            let address = MMIO_BASE.load(Ordering::Relaxed) + offset as u64;
+            unsafe { (address as *const u32).read_volatile() as u64 }
+        }
+        _ => 0,
+    }
+}
 
 const LVT_MASKED: u32 = 1 << 16;
 const LVT_PERIODIC_MODE: u32 = 0b01 << 17;
@@ -76,15 +116,16 @@ pub fn timestamp() -> u64 {
     (high as u64) << 32 | low as u64
 }
 
-/// x2APIC is required; a TSC-deadline timer is a bonus. Returns
-/// `(x2apic, tsc_deadline)`.
-fn features() -> (bool, bool) {
-    let (mut features, mut power_features) = (0u32, 0u32);
+/// What this CPU offers: `(apic, x2apic, tsc_deadline)`. Only `apic` is
+/// required — the rest are upgrades.
+fn features() -> (bool, bool, bool) {
+    let (mut features, mut edx_features, mut power_features) = (0u32, 0u32, 0u32);
     unsafe {
-        // CPUID.01H: ECX[21] = x2APIC, ECX[24] = TSC-Deadline
+        // CPUID.01H: ECX[21] = x2APIC, ECX[24] = TSC-Deadline, EDX[9] = APIC
         asm!(
-            "push rbx", "mov eax, 1", "cpuid", "mov {ecx:e}, ecx", "pop rbx",
-            ecx = out(reg) features, out("eax") _, out("ecx") _, out("edx") _,
+            "push rbx", "mov eax, 1", "cpuid", "mov {ecx:e}, ecx", "mov {edx:e}, edx", "pop rbx",
+            ecx = out(reg) features, edx = out(reg) edx_features,
+            out("eax") _, out("ecx") _, out("edx") _,
             options(nostack),
         );
         // CPUID.80000007H: EDX[8] = invariant TSC
@@ -97,8 +138,13 @@ fn features() -> (bool, bool) {
     let x2apic = features & (1 << 21) != 0;
     let deadline = features & (1 << 24) != 0;
     let invariant_tsc = power_features & (1 << 8) != 0;
+    // CPUID.01H:EDX[9] = on-chip APIC
+    let apic = edx_features & (1 << 9) != 0;
+    if !apic {
+        serial::write_str("apic: no local APIC at all\n");
+    }
     if !x2apic {
-        serial::write_str("apic: no x2APIC\n");
+        serial::write_str("apic: no x2APIC; using xAPIC MMIO\n");
     }
     if !deadline {
         serial::write_str("apic: no TSC-deadline timer; using APIC periodic mode\n");
@@ -106,7 +152,7 @@ fn features() -> (bool, bool) {
     if !invariant_tsc {
         serial::write_str("apic: TSC not invariant (timing may drift)\n");
     }
-    (x2apic, deadline)
+    (apic, x2apic, deadline)
 }
 
 /// Spin until the 8254's channel-2 one-shot expires. The classic
@@ -149,29 +195,39 @@ fn pit_wait(milliseconds: u64) -> bool {
 pub(crate) fn init(period_microseconds: u64) -> u64 {
     const CALIBRATION_MILLISECONDS: u64 = 10;
 
-    let (x2apic, tsc_deadline) = features();
-    if !x2apic {
+    let (apic, x2apic, tsc_deadline) = features();
+    if !apic {
         return 0;
     }
 
-    // Enable x2APIC mode (order matters: the xAPIC enable bit goes first).
+    // Enable the APIC. The base MSR carries both the global enable bit and,
+    // in xAPIC mode, the MMIO base the firmware chose.
     let base = read_msr(IA32_APIC_BASE);
-    write_msr(IA32_APIC_BASE, base | APIC_BASE_ENABLE | APIC_BASE_X2APIC);
+    if x2apic {
+        // Order matters: the xAPIC enable bit must be set before (or with)
+        // the x2APIC bit; the reverse transition is architecturally invalid.
+        write_msr(IA32_APIC_BASE, base | APIC_BASE_ENABLE | APIC_BASE_X2APIC);
+        MODE.store(MODE_X2APIC, Ordering::Relaxed);
+    } else {
+        write_msr(IA32_APIC_BASE, base | APIC_BASE_ENABLE);
+        MMIO_BASE.store(base & APIC_BASE_ADDRESS_MASK, Ordering::Relaxed);
+        MODE.store(MODE_XAPIC, Ordering::Relaxed);
+    }
     // Spurious vector register: bit 8 = APIC software enable.
-    write_msr(X2APIC_SIVR, 0x100 | 0xff);
+    write_register(REGISTER_SIVR, 0x100 | 0xff);
 
     // Calibrate both clocks in one PIT interval, with the APIC timer masked
     // and free-running from its maximum count.
-    write_msr(X2APIC_DIVIDE_CONFIG, DIVIDE_BY_16);
-    write_msr(X2APIC_LVT_TIMER, (LVT_MASKED | TIMER_VECTOR as u32) as u64);
-    write_msr(X2APIC_INITIAL_COUNT, u32::MAX as u64);
+    write_register(REGISTER_DIVIDE_CONFIG, DIVIDE_BY_16);
+    write_register(REGISTER_LVT_TIMER, (LVT_MASKED | TIMER_VECTOR as u32) as u64);
+    write_register(REGISTER_INITIAL_COUNT, u32::MAX as u64);
     let tsc_start = timestamp();
     if !pit_wait(CALIBRATION_MILLISECONDS) {
         return 0;
     }
     let tsc_elapsed = timestamp() - tsc_start;
-    let apic_elapsed = u32::MAX as u64 - read_msr(X2APIC_CURRENT_COUNT);
-    write_msr(X2APIC_INITIAL_COUNT, 0); // stop the calibration run
+    let apic_elapsed = u32::MAX as u64 - read_register(REGISTER_CURRENT_COUNT);
+    write_register(REGISTER_INITIAL_COUNT, 0); // stop the calibration run
 
     let microseconds = CALIBRATION_MILLISECONDS * 1000;
     let tsc_per_microsecond = tsc_elapsed / microseconds;
@@ -184,14 +240,14 @@ pub(crate) fn init(period_microseconds: u64) -> u64 {
     if tsc_deadline {
         DEADLINE_MODE.store(1, Ordering::Relaxed);
         PERIOD.store(tsc_per_microsecond * period_microseconds, Ordering::Relaxed);
-        write_msr(X2APIC_LVT_TIMER, (LVT_TSC_DEADLINE_MODE | TIMER_VECTOR as u32) as u64);
+        write_register(REGISTER_LVT_TIMER, (LVT_TSC_DEADLINE_MODE | TIMER_VECTOR as u32) as u64);
         arm_next_deadline();
     } else {
         if apic_per_microsecond == 0 {
             return 0;
         }
-        write_msr(X2APIC_LVT_TIMER, (LVT_PERIODIC_MODE | TIMER_VECTOR as u32) as u64);
-        write_msr(X2APIC_INITIAL_COUNT, apic_per_microsecond * period_microseconds);
+        write_register(REGISTER_LVT_TIMER, (LVT_PERIODIC_MODE | TIMER_VECTOR as u32) as u64);
+        write_register(REGISTER_INITIAL_COUNT, apic_per_microsecond * period_microseconds);
     }
     tsc_per_microsecond
 }
@@ -209,7 +265,7 @@ pub(crate) fn arm_next_deadline() {
 }
 
 pub(crate) fn end_of_interrupt() {
-    write_msr(X2APIC_EOI, 0);
+    write_register(REGISTER_EOI, 0);
 }
 
 pub(crate) fn record_tick() {
