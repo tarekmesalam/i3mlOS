@@ -19,6 +19,8 @@ mod agents;
 mod banner;
 mod logo;
 mod resident;
+mod tool;
+mod toolmod;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -87,8 +89,9 @@ fn kmain(boot: BootInfo) -> ! {
     draw_boot_screen(&boot, &mut out);
     run_first_agents(&mut out);
     run_the_yard(&mut out);
+    run_a_wasm_agent(&mut out);
 
-    serial::write_str("nawa: M2 complete, parking\n");
+    serial::write_str("nawa: M3 complete, parking\n");
     qemu::exit(qemu::EXIT_SUCCESS);
     entry::park()
 }
@@ -248,6 +251,62 @@ fn run_first_agents(out: &mut SerialWriter) {
         );
     });
     let _ = writeln!(out, "agents: first agent scheduled by an original kernel — i3mel");
+}
+
+/// Run an agent that is a WebAssembly module. Two things are proven here:
+/// the tool's manifest is resolved against capabilities *before* it runs, and
+/// a module whose manifest asks for something it was not granted is refused
+/// at load — it never reaches its first instruction.
+fn run_a_wasm_agent(out: &mut SerialWriter) {
+    let Ok(module) = i3ml_wasm::Module::decode(&toolmod::MODULE) else {
+        let _ = writeln!(out, "wasm: module REJECTED by the decoder");
+        return;
+    };
+    let _ = writeln!(out, "wasm: module decoded — manifest:");
+    for requirement in i3ml_wasm::manifest(&module) {
+        let _ = writeln!(out, "  needs {}::{}", requirement.module, requirement.name);
+    }
+
+    let agent = gate::spawn("read the inbox, as a wasm tool", 0, Budget::new(400, 0), 2_000, |_| {
+        nawa_gate::Progress::Done
+    });
+    let Some(read) = gate::grant(agent, agents::root_read()) else {
+        return;
+    };
+
+    // Refused first: the same module, with nothing granted for `invoke`.
+    match tool::bind(&module, agent, &[]) {
+        Err(tool::LoadError::UnauthorizedImport) => {
+            let _ = writeln!(out, "wasm: refused to load — imports invoke, was granted nothing");
+        }
+        _ => {
+            let _ = writeln!(out, "wasm: MANIFEST LAW BROKEN — loaded without a grant");
+        }
+    }
+
+    // Now bound properly: `invoke` resolves to the fs:read capability.
+    let Ok(mut host) = tool::bind(&module, agent, &[("invoke", read)]) else {
+        let _ = writeln!(out, "wasm: bind FAILED with a grant present");
+        return;
+    };
+    match tool::run(&module, &mut host, "run", 100_000) {
+        Ok(Some(value)) => {
+            let _ = writeln!(
+                out,
+                "wasm: tool ran — {} of 3 invocations allowed, {} crossings, {} refusals",
+                value.as_i64(),
+                host.crossings,
+                host.refusals
+            );
+        }
+        Ok(None) => {
+            let _ = writeln!(out, "wasm: tool ran with no result");
+        }
+        Err(trap) => {
+            let _ = writeln!(out, "wasm: tool trapped: {trap:?}");
+        }
+    }
+    let _ = writeln!(out, "wasm: an agent is a module now — i3mel");
 }
 
 /// The kernel side of a gate crossing from ring 3. Untrusted code has no

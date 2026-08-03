@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "i3ml-wasm"
+version = "0.0.1"
+
+[[package]]
 name = "nawa-aman"
 version = "0.0.1"
 dependencies = [
@@ -27,6 +31,7 @@ dependencies = [
 name = "nawa-kernel"
 version = "0.0.1"
 dependencies = [
+ "i3ml-wasm",
  "nawa-aman",
  "nawa-core",
  "nawa-gate",

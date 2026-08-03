@@ -23,7 +23,16 @@ Honesty page, updated every release. Today the kernel:
   kernel, in memory it cannot address. This is where "capabilities cannot be
   forged" and "the journal cannot be falsified" stop being properties of the
   type system and become properties of the hardware.
-- **Cannot:** isolate yard residents *from each other* (one shared user
+- **Can (M3):** run an agent that is a **WebAssembly module** — decoded,
+  bounded by fuel, memory-checked, and bound to capabilities through its
+  import list *before* it executes. A module that imports a verb it was not
+  granted is refused at load, so an unauthorized call is unreachable rather
+  than merely denied.
+- **Cannot:** run WASM modules in the yard yet (the interpreter is still
+  kernel-side; moving it into ring 3 is the next step), checkpoint a running
+  module (the state is data by construction, but nothing serializes it yet),
+  handle floats, tables, globals, or `br_table` (outside the subset, refused
+  by the decoder), isolate yard residents *from each other* (one shared user
   address space; per-agent address spaces are a Phase 3 milestone costed at
   4–6 months), run anything but hand-assembled residents (the WASM
   interpreter is next), checkpoint or resume an agent across a reboot (agents are

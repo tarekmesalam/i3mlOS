@@ -1,0 +1,9 @@
+[package]
+name = "i3ml-wasm"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "A from-scratch WebAssembly interpreter: the format agents are written in, and the manifest their imports declare"
+
+[lib]
+name = "i3ml_wasm"

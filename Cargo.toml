@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["nawa/core", "nawa/sijil", "nawa/aman", "nawa/gate", "nawa/kernel", "xtask"]
+members = ["nawa/core", "nawa/sijil", "nawa/aman", "nawa/gate", "nawa/kernel", "libs/wasm", "xtask"]
 # Plain `cargo build`/`cargo test` at the root touches host tooling only;
 # the kernel is always built for its UEFI target via `cargo xtask`.
 default-members = ["xtask"]
