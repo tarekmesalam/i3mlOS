@@ -4,7 +4,7 @@
 //! [`BootInfo`] to `kmain`. From `ExitBootServices` onward, every instruction
 //! that runs is ours.
 
-use crate::{apic, arch, fb, gdt, heap, idt, mem, serial, uefi};
+use crate::{apic, arch, fb, gdt, heap, idt, mem, paging, serial, uefi, yard};
 
 /// Everything the safe kernel gets to touch after bring-up.
 pub struct BootInfo {
@@ -16,6 +16,8 @@ pub struct BootInfo {
     pub heap_ok: bool,
     /// TSC ticks per microsecond (0 = no timer; the kernel runs untimed).
     pub tsc_per_microsecond: u64,
+    /// GiB identity-mapped by our own page tables (0 = still on firmware's).
+    pub mapped_gibibytes: u64,
 }
 
 /// Timer period. 1 kHz: fine enough for budget accounting, coarse enough
@@ -62,6 +64,20 @@ pub fn boot(
     serial::write_str("nawa: gdt+tss+idt loaded\n");
 
     let stats = mem::init(memory_map);
+
+    // Our own page tables, before the heap: from here the kernel controls
+    // who may touch what, which is the precondition for ring 3.
+    let framebuffer_end = framebuffer.map(|fb| fb.end_address() as u64).unwrap_or(0);
+    serial::write_str("nawa: building page tables\n");
+    let mapped_gibibytes = paging::init(memory_map, framebuffer_end);
+    if mapped_gibibytes != 0 {
+        serial::write_str("nawa: own page tables live\n");
+        yard::init();
+        serial::write_str("nawa: syscall gate armed — the yard can be entered\n");
+    } else {
+        serial::write_str("nawa: paging setup FAILED; still on firmware tables\n");
+    }
+
     let heap_ok = heap::init();
 
     // The heartbeat comes last: nothing may preempt bring-up, and the
@@ -81,6 +97,7 @@ pub fn boot(
         managed_bytes: stats.managed_bytes,
         heap_ok,
         tsc_per_microsecond,
+        mapped_gibibytes,
     })
 }
 

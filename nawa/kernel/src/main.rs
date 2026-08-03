@@ -18,6 +18,7 @@ extern crate alloc;
 mod agents;
 mod banner;
 mod logo;
+mod resident;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -26,7 +27,7 @@ use core::fmt::Write;
 use nawa_core::entry::{self, BootInfo};
 use nawa_core::serial::SerialWriter;
 use nawa_core::uefi::{EfiHandle, EfiStatus, EfiSystemTable};
-use nawa_core::{apic, qemu, selftest, serial};
+use nawa_core::{apic, qemu, selftest, serial, yard};
 use nawa_gate::{self as gate, Budget, State};
 use nawa_sijil as sijil;
 
@@ -79,10 +80,15 @@ fn kmain(boot: BootInfo) -> ! {
         );
     }
 
+    if boot.mapped_gibibytes != 0 {
+        let _ = writeln!(out, "paging: {} GiB identity-mapped by our own tables", boot.mapped_gibibytes);
+    }
+
     draw_boot_screen(&boot, &mut out);
     run_first_agents(&mut out);
+    run_the_yard(&mut out);
 
-    serial::write_str("nawa: M1 complete, parking\n");
+    serial::write_str("nawa: M2 complete, parking\n");
     qemu::exit(qemu::EXIT_SUCCESS);
     entry::park()
 }
@@ -216,4 +222,65 @@ fn run_first_agents(out: &mut SerialWriter) {
         );
     });
     let _ = writeln!(out, "agents: first agent scheduled by an original kernel — i3mel");
+}
+
+/// The kernel side of a gate crossing from ring 3. Untrusted code has no
+/// capability table entry of its own yet, so M2 implements the one verb that
+/// needs none — and journals it, which is the point: the record of what
+/// untrusted code did is written by the kernel, in kernel memory the
+/// resident cannot address.
+fn on_yard_crossing(verb: u64, argument: u64) -> u64 {
+    const VERB_JOURNAL: u64 = 5;
+    if verb == VERB_JOURNAL {
+        let label =
+            if argument == resident::GREETING { "ring3:journal" } else { "ring3:journal-other" };
+        sijil::record(0, sijil::Event::Invoked, argument, label);
+        return 0;
+    }
+    sijil::record(0, sijil::Event::Denied, verb, "ring3:unknown-verb");
+    u64::MAX
+}
+
+/// Enter the yard. Two claims become hardware facts here — the whole reason
+/// this milestone exists.
+fn run_the_yard(out: &mut SerialWriter) {
+    if !nawa_core::paging::active() {
+        let _ = writeln!(out, "yard: skipped — no page tables of our own");
+        return;
+    }
+    yard::set_crossing_hook(on_yard_crossing);
+    if !yard::load(&resident::PROGRAM) {
+        let _ = writeln!(out, "yard: FAILED to load the resident");
+        return;
+    }
+    let _ = writeln!(out, "yard: resident loaded at {:#x}, dropping to ring 3", yard::CODE_ADDRESS);
+
+    // Returns when the resident faults or exits; it never resumes.
+    yard::enter();
+
+    let _ = writeln!(
+        out,
+        "yard: back in the kernel — {} gate crossing(s) from ring 3, last verb {}",
+        yard::crossings(),
+        yard::last_verb()
+    );
+    if yard::crossings() > 0 {
+        let _ = writeln!(out, "yard: untrusted code reached the kernel only through the gate");
+    }
+    // The journal recorded the crossing, in memory ring 3 cannot address.
+    let mut ring3_entries = 0;
+    sijil::for_each(|entry| {
+        if entry.label.as_str().starts_with("ring3:") {
+            ring3_entries += 1;
+            let _ = writeln!(
+                out,
+                "  sijil #{} {:?}({:#x}) {}",
+                entry.sequence,
+                entry.event,
+                entry.detail,
+                entry.label.as_str()
+            );
+        }
+    });
+    let _ = writeln!(out, "yard: {ring3_entries} ring-3 crossing(s) in the journal — isolation is hardware now");
 }

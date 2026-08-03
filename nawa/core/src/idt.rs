@@ -122,6 +122,9 @@ extern "x86-interrupt" fn double_fault(frame: InterruptFrame, _error_code: u64) 
 }
 
 extern "x86-interrupt" fn general_protection(frame: InterruptFrame, error_code: u64) {
+    if from_user(&frame) {
+        kill_resident("general protection fault", frame.rip, error_code);
+    }
     panic!("general protection fault at {:#x} (error {:#x})", frame.rip, error_code);
 }
 
@@ -130,8 +133,35 @@ extern "x86-interrupt" fn page_fault(frame: InterruptFrame, error_code: u64) {
     unsafe {
         asm!("mov {}, cr2", out(reg) faulting_address, options(nomem, nostack, preserves_flags));
     }
+    if from_user(&frame) {
+        // Expected and load-bearing: a yard resident reached for memory it
+        // does not have. The CPU refused before we did.
+        let mut out = serial::SerialWriter;
+        let _ = writeln!(
+            out,
+            "yard: resident faulted reaching {faulting_address:#x} from {:#x} (error {error_code:#x})",
+            frame.rip
+        );
+        kill_resident("page fault", frame.rip, faulting_address);
+    }
     panic!(
         "page fault: address {:#x}, error {:#x}, at {:#x}",
         faulting_address, error_code, frame.rip
     );
+}
+
+/// Did this fault come from ring 3? The CPU records the interrupted CS, and
+/// its low two bits are the privilege level that was running.
+fn from_user(frame: &InterruptFrame) -> bool {
+    frame.cs & 3 == 3 && crate::yard::is_active()
+}
+
+/// Terminate the yard resident and return to kernel flow. The faulting
+/// context is never resumed — that is what makes the isolation real rather
+/// than advisory.
+fn kill_resident(kind: &str, rip: u64, detail: u64) -> ! {
+    let mut out = serial::SerialWriter;
+    let _ = writeln!(out, "yard: killed resident — {kind} at {rip:#x} ({detail:#x})");
+    // `leave` restores the caller's stack and registers itself.
+    unsafe { crate::yard::leave() }
 }

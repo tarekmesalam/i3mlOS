@@ -22,13 +22,15 @@ pub mod entry;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod fb;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
-mod gdt;
+pub mod gdt;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod heap;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 mod idt;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod mem;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+pub mod paging;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 mod panic;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
@@ -40,3 +42,5 @@ pub mod serial;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod uefi;
 pub mod vec_lite;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+pub mod yard;

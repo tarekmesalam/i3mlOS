@@ -16,10 +16,17 @@ Honesty page, updated every release. Today the kernel:
   irreversible actions park for human consent; delegation can only narrow
   authority; and an exhausted budget suspends an agent instead of
   overspending. CI asserts all ten of these behaviors on every commit.
-- **Cannot:** own its page tables (still on the firmware's identity map),
-  isolate anything in hardware (no user mode yet — that is the yard, M2; until
-  then the trust claims are enforced by the type system and the gate, not by
-  the CPU), checkpoint or resume an agent across a reboot (agents are
+- **Can (M2 — the yard):** run on **its own page tables**, and run untrusted
+  code in **ring 3** with exactly one way back in: `syscall` into the gate.
+  A yard resident cannot read kernel memory — the CPU refuses at the page
+  walk, not our code — and every crossing it makes is journaled by the
+  kernel, in memory it cannot address. This is where "capabilities cannot be
+  forged" and "the journal cannot be falsified" stop being properties of the
+  type system and become properties of the hardware.
+- **Cannot:** isolate yard residents *from each other* (one shared user
+  address space; per-agent address spaces are a Phase 3 milestone costed at
+  4–6 months), run anything but hand-assembled residents (the WASM
+  interpreter is next), checkpoint or resume an agent across a reboot (agents are
   in-kernel step functions; WASM instances in Phase 2 make execution state
   data by construction), coalesce freed heap blocks, reclaim boot-services
   memory, talk to any device beyond serial + framebuffer, reach a model or a
@@ -27,8 +34,9 @@ Honesty page, updated every release. Today the kernel:
   store anything in DHAKIRA, shape Arabic live (the banner is baked at build
   time), or run on real hardware.
 
-Per the claims ladder we say **"governed, journaled, undoable"** now that the
-gate exists, **"isolated"** only after the yard (Ring 3) lands, and
-**"secure"** never — until an external audit.
+Per the claims ladder we may now say **"governed, journaled, undoable"** and
+— since M2 — **"isolated"**, meaning untrusted code is isolated from the
+kernel by the CPU. We do not say **"secure"**, and will not until an external
+audit; nor do we claim residents are isolated from one another.
 
 Roadmap and binding gates: [MASTER_PLAN.md](MASTER_PLAN.md) §5.

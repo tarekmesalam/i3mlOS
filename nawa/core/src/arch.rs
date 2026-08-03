@@ -38,7 +38,7 @@ pub(crate) fn disable_interrupts() {
 
 /// Unmask interrupts. Called once bring-up is complete and the timer hook is
 /// installed — from here on, the kernel can be preempted.
-pub(crate) fn enable_interrupts() {
+pub fn enable_interrupts() {
     unsafe {
         asm!("sti", options(nomem, nostack));
     }

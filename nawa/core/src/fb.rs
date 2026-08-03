@@ -38,6 +38,12 @@ impl Framebuffer {
         Self { base, width, height, stride, layout }
     }
 
+    /// One past the last byte of the framebuffer — the paging code maps up
+    /// to here so the screen survives the switch to our own tables.
+    pub fn end_address(&self) -> usize {
+        self.base + self.stride * self.height * 4
+    }
+
     fn encode(&self, r: u8, g: u8, b: u8) -> u32 {
         match self.layout {
             PixelLayout::Rgbx => (r as u32) | (g as u32) << 8 | (b as u32) << 16,
