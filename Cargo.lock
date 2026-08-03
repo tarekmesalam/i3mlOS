@@ -3,11 +3,38 @@
 version = 4
 
 [[package]]
+name = "nawa-aman"
+version = "0.0.1"
+dependencies = [
+ "nawa-core",
+ "nawa-sijil",
+]
+
+[[package]]
 name = "nawa-core"
 version = "0.0.1"
 
 [[package]]
+name = "nawa-gate"
+version = "0.0.1"
+dependencies = [
+ "nawa-aman",
+ "nawa-core",
+ "nawa-sijil",
+]
+
+[[package]]
 name = "nawa-kernel"
+version = "0.0.1"
+dependencies = [
+ "nawa-aman",
+ "nawa-core",
+ "nawa-gate",
+ "nawa-sijil",
+]
+
+[[package]]
+name = "nawa-sijil"
 version = "0.0.1"
 dependencies = [
  "nawa-core",

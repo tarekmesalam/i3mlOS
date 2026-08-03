@@ -4,7 +4,7 @@
 //! [`BootInfo`] to `kmain`. From `ExitBootServices` onward, every instruction
 //! that runs is ours.
 
-use crate::{arch, fb, gdt, heap, idt, mem, serial, uefi};
+use crate::{apic, arch, fb, gdt, heap, idt, mem, serial, uefi};
 
 /// Everything the safe kernel gets to touch after bring-up.
 pub struct BootInfo {
@@ -14,7 +14,13 @@ pub struct BootInfo {
     /// Bytes actually managed by the frame allocator (largest region).
     pub managed_bytes: u64,
     pub heap_ok: bool,
+    /// TSC ticks per microsecond (0 = no timer; the kernel runs untimed).
+    pub tsc_per_microsecond: u64,
 }
+
+/// Timer period. 1 kHz: fine enough for budget accounting, coarse enough
+/// that the tick itself costs nothing measurable.
+const TICK_MICROSECONDS: u64 = 1_000;
 
 /// Trusted-core boundary: `image_handle`/`system_table` must be the values
 /// UEFI passed to `efi_main`, forwarded untouched.
@@ -28,6 +34,7 @@ pub struct BootInfo {
 pub fn boot(
     image_handle: uefi::EfiHandle,
     system_table: *mut uefi::EfiSystemTable,
+    timer_hook: fn(),
     kmain: fn(BootInfo) -> !,
 ) -> ! {
     serial::init();
@@ -57,11 +64,23 @@ pub fn boot(
     let stats = mem::init(memory_map);
     let heap_ok = heap::init();
 
+    // The heartbeat comes last: nothing may preempt bring-up, and the
+    // scheduler's hook must be installed before the first tick can land.
+    idt::set_timer_hook(timer_hook);
+    let tsc_per_microsecond = apic::init(TICK_MICROSECONDS);
+    if tsc_per_microsecond != 0 {
+        arch::enable_interrupts();
+        serial::write_str("nawa: apic timer armed — the kernel has a heartbeat\n");
+    } else {
+        serial::write_str("nawa: no apic timer; running untimed\n");
+    }
+
     kmain(BootInfo {
         framebuffer,
         usable_bytes: stats.usable_bytes,
         managed_bytes: stats.managed_bytes,
         heap_ok,
+        tsc_per_microsecond,
     })
 }
 

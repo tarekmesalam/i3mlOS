@@ -60,6 +60,16 @@ const DOUBLE_FAULT: usize = 8;
 const GENERAL_PROTECTION: usize = 13;
 const PAGE_FAULT: usize = 14;
 
+/// Set by the supervisor: called from the timer interrupt, in interrupt
+/// context, with interrupts still masked. Must be short and must not block.
+static TIMER_HOOK: crate::cell::StaticCell<Option<fn()>> = crate::cell::StaticCell::new(None);
+
+/// Register the scheduler's tick hook. Bring-up only, before interrupts are
+/// enabled.
+pub(crate) fn set_timer_hook(hook: fn()) {
+    unsafe { *TIMER_HOOK.get() = Some(hook) }
+}
+
 /// Build and load the IDT. Called once, single-threaded, interrupts masked.
 pub(crate) fn init() {
     unsafe {
@@ -70,6 +80,7 @@ pub(crate) fn init() {
         (*idt)[DOUBLE_FAULT].set(double_fault as *const () as u64, gdt::DOUBLE_FAULT_IST_INDEX);
         (*idt)[GENERAL_PROTECTION].set(general_protection as *const () as u64, 0);
         (*idt)[PAGE_FAULT].set(page_fault as *const () as u64, 0);
+        (*idt)[crate::apic::TIMER_VECTOR as usize].set(timer as *const () as u64, 0);
 
         let pointer = DescriptorTablePointer {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -77,6 +88,18 @@ pub(crate) fn init() {
         };
         asm!("lidt [{}]", in(reg) &pointer, options(nostack, preserves_flags));
     }
+}
+
+/// The kernel's heartbeat. Rearm first so a slow hook cannot stall the clock,
+/// then run the supervisor's tick, then acknowledge.
+extern "x86-interrupt" fn timer(_frame: InterruptFrame) {
+    crate::apic::record_tick();
+    crate::apic::arm_next_deadline();
+    let hook = unsafe { *TIMER_HOOK.get() };
+    if let Some(hook) = hook {
+        hook();
+    }
+    crate::apic::end_of_interrupt();
 }
 
 extern "x86-interrupt" fn divide_error(frame: InterruptFrame) {

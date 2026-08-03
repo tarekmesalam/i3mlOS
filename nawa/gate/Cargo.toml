@@ -1,16 +1,11 @@
 [package]
-name = "nawa-kernel"
+name = "nawa-gate"
 version = "0.0.1"
 edition.workspace = true
 license.workspace = true
-description = "The i3ml kernel binary — safe Rust over the NAWA trusted core"
-
-[[bin]]
-name = "nawa"
-path = "src/main.rs"
+description = "The AmanGate ABI and the agent supervisor: agents (not processes) are the schedulable unit"
 
 [dependencies]
 nawa-core = { path = "../core" }
 nawa-sijil = { path = "../sijil" }
 nawa-aman = { path = "../aman" }
-nawa-gate = { path = "../gate" }

@@ -12,9 +12,11 @@
 #![feature(abi_x86_interrupt)]
 
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+pub mod apic;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod arch;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
-mod cell;
+pub mod cell;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod entry;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
@@ -37,3 +39,4 @@ pub mod selftest;
 pub mod serial;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod uefi;
+pub mod vec_lite;

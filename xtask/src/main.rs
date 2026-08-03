@@ -16,13 +16,19 @@ use std::{env, fs, io::Read, thread};
 
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const HELLO_LINE: &str = "hello from the i3ml kernel";
-/// Every marker must appear on serial for the boot test to pass.
-const MARKERS: [&str; 5] = [
+/// Every marker must appear on serial for the boot test to pass. Each one is
+/// a law the kernel claims to enforce, asserted on every commit.
+const MARKERS: [&str; 10] = [
     HELLO_LINE,
     "nawa: exit_boot_services ok",
     "int3: breakpoint handled",
     "heap: ok",
     "MiB usable",
+    "apic timer armed",                       // the kernel has a heartbeat
+    "delegated to agent",                     // agents spawn agents
+    "refused to widen",                       // the attenuation law holds
+    "parked awaiting approval",               // the irreversible waits for a human
+    "suspended by its budget",                // budgets bind, spending never exceeds
 ];
 /// isa-debug-exit: (0x10 << 1) | 1 — must match nawa_core::qemu::EXIT_SUCCESS.
 const QEMU_SUCCESS_STATUS: i32 = 33;
@@ -115,7 +121,9 @@ fn qemu_command(esp: &Path, headless: bool, testing: bool) -> Result<Command, St
     fs::copy(&firmware.vars, &vars_copy).map_err(|e| format!("copy vars: {e}"))?;
 
     let mut qemu = Command::new("qemu-system-x86_64");
-    qemu.args(["-machine", "q35", "-m", "256M", "-nic", "none", "-serial", "stdio"]);
+    // `-cpu max`: the default QEMU CPU model advertises neither x2APIC nor a
+    // TSC-deadline timer, so the kernel would fall back to running untimed.
+    qemu.args(["-machine", "q35", "-cpu", "max", "-m", "256M", "-nic", "none", "-serial", "stdio"]);
     qemu.arg("-drive").arg(format!("if=pflash,format=raw,readonly=on,file={}", firmware.code.display()));
     qemu.arg("-drive").arg(format!("if=pflash,format=raw,file={}", vars_copy.display()));
     qemu.arg("-drive").arg(format!("format=raw,file=fat:rw:{}", esp.display()));
