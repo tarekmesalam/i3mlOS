@@ -39,6 +39,10 @@ pub enum Event {
     Rejected,
     /// Memory (DHAKIRA) was read or written. `detail` = namespace id.
     Remembered,
+    /// A tool wrote a note. Its own event type on purpose: a note is the
+    /// tool's word, and must never be mistakable for something the kernel
+    /// observed. `detail` is whatever the tool passed.
+    Noted,
     /// The agent finished. `detail` = 0 ok, 1 failed, 2 killed.
     Finished,
     /// Budget exhausted; the agent was suspended rather than overspending.

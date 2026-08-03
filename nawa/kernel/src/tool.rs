@@ -27,7 +27,14 @@ pub struct GateHost {
     verbs: [Option<usize>; 8],
     pub crossings: u32,
     pub refusals: u32,
+    /// Notes written this run. Bounded because the journal is a fixed ring:
+    /// a tool that could write without limit could push every other entry
+    /// out of it — erasing history is as good as forging it.
+    notes: u32,
 }
+
+/// How many notes one run may add to the journal.
+const MAX_NOTES: u32 = 8;
 
 impl Host for GateHost {
     fn call(&mut self, import: usize, arguments: &[Value]) -> exec::Result<Option<Value>> {
@@ -51,8 +58,15 @@ impl Host for GateHost {
                 }
             }
             "journal" => {
+                if self.notes >= MAX_NOTES {
+                    self.refusals += 1;
+                    return Ok(Some(Value::I32(-1)));
+                }
+                self.notes += 1;
                 let detail = arguments.first().map(|value| value.as_i64() as u64).unwrap_or(0);
-                sijil::record(self.agent, sijil::Event::Invoked, detail, "wasm:journal");
+                // `Noted`, not `Invoked`: a tool may say things, but it may
+                // not make the record claim the kernel did something.
+                sijil::record(self.agent, sijil::Event::Noted, detail, "wasm:note");
                 Ok(Some(Value::I32(0)))
             }
             "approve" => {
@@ -93,8 +107,14 @@ pub fn bind<'a>(
     agent: AgentId,
     grants: &[(&str, Capability)],
 ) -> Result<GateHost, LoadError> {
-    let mut host =
-        GateHost { agent, bindings: [None; VERBS.len()], verbs: [None; 8], crossings: 0, refusals: 0 };
+    let mut host = GateHost {
+        agent,
+        bindings: [None; VERBS.len()],
+        verbs: [None; 8],
+        crossings: 0,
+        refusals: 0,
+        notes: 0,
+    };
 
     for requirement in manifest(module) {
         if requirement.module != "i3ml" || requirement.index >= host.verbs.len() {

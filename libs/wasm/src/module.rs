@@ -112,9 +112,17 @@ const MAX_FUNCTIONS: usize = 256;
 const MAX_EXPORTS: usize = 64;
 const MAX_LOCALS: usize = 256;
 const MAX_MEMORY_PAGES: u32 = 16; // 1 MiB
+const MAX_DATA_SEGMENTS: usize = 32;
+/// A module bigger than this is refused before anything is parsed. The kernel
+/// heap is 4 MiB and does not coalesce; module bytes are the one input whose
+/// size an attacker chooses freely.
+pub const MAX_MODULE_BYTES: usize = 128 * 1024;
 
 impl<'a> Module<'a> {
     pub fn decode(bytes: &'a [u8]) -> Result<Module<'a>> {
+        if bytes.len() > MAX_MODULE_BYTES {
+            return Err(Error::TooLarge);
+        }
         let mut reader = Reader::new(bytes);
         if reader.slice(4)? != b"\0asm" {
             return Err(Error::NotWasm);
@@ -136,8 +144,20 @@ impl<'a> Module<'a> {
         // matched against bodies in the code section.
         let mut function_types: Vec<u32> = Vec::new();
 
+        // Non-custom sections must appear at most once, in the order the
+        // format mandates. Enforcing that is not pedantry: every ceiling
+        // below counts a single section's entries, so a repeated section
+        // multiplied every limit and let a small module exhaust the kernel
+        // heap — an allocation failure a kernel cannot survive.
+        let mut previous_id = 0u8;
         while !reader.at_end() {
             let id = reader.byte()?;
+            if id != 0 {
+                if id <= previous_id {
+                    return Err(Error::Malformed);
+                }
+                previous_id = id;
+            }
             let size = reader.usize()?;
             let start = reader.position();
             let end = start.checked_add(size).ok_or(Error::Truncated)?;
@@ -297,6 +317,9 @@ impl<'a> Module<'a> {
 
     fn decode_data(&mut self, reader: &mut Reader<'a>) -> Result<()> {
         let count = reader.usize()?;
+        if count > MAX_DATA_SEGMENTS {
+            return Err(Error::TooLarge);
+        }
         for _ in 0..count {
             if reader.u32()? != 0 {
                 return Err(Error::Unsupported); // one memory only

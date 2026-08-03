@@ -65,6 +65,9 @@ static SUPERVISOR: SpinLock<Option<Supervisor>> = SpinLock::new(None);
 /// deadlock against any thread already holding it.
 static TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// How many unanswered questions one agent may have outstanding.
+const MAX_PENDING_APPROVALS: usize = 4;
+
 /// Bring up AMAN's table and the supervisor. Bring-up only.
 pub fn init() {
     aman::init_table();
@@ -344,6 +347,25 @@ pub fn request_approval(agent: AgentId, capability: Capability, note: &str) -> R
     let what = aman::describe(&authority);
     let id = SUPERVISOR.with(|supervisor| {
         let supervisor = supervisor.as_mut().expect("gate::init");
+        // An agent asking the same question again gets the same question
+        // back, and it may not queue an unbounded pile of them: a consent
+        // surface a tool can flood is a consent surface nobody reads, and
+        // the queue is kernel memory.
+        if let Some(existing) = supervisor.approvals.iter().find(|approval| {
+            approval.agent == agent
+                && approval.capability == capability
+                && approval.answered.is_none()
+        }) {
+            return Some(existing.id);
+        }
+        let pending = supervisor
+            .approvals
+            .iter()
+            .filter(|approval| approval.agent == agent && approval.answered.is_none())
+            .count();
+        if pending >= MAX_PENDING_APPROVALS {
+            return None;
+        }
         let id = supervisor.next_approval_id;
         supervisor.next_approval_id += 1;
         supervisor.approvals.push(ApprovalRequest {
@@ -358,8 +380,12 @@ pub fn request_approval(agent: AgentId, capability: Capability, note: &str) -> R
         if let Some(found) = supervisor.agents.iter_mut().find(|a| a.id == agent) {
             found.awaiting = Some(id);
         }
-        id
+        Some(id)
     });
+    let Some(id) = id else {
+        sijil::record(agent, sijil::Event::Denied, capability.index() as u64, "denied:approval-flood");
+        return Err(Denied::NotASubset);
+    };
     sijil::record(agent, sijil::Event::ApprovalRequested, capability.index() as u64, what);
     Ok(id)
 }

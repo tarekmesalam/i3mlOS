@@ -98,6 +98,13 @@ impl<'a> Reader<'a> {
         let mut shift: u32 = 0;
         loop {
             let byte = self.byte()?;
+            // Guard the shift itself, not the loop afterwards: `<< 70` on an
+            // i64 is an overflow panic in a checked build and undefined
+            // nonsense in a release one, and twelve attacker-chosen bytes
+            // were enough to reach it.
+            if shift >= bits {
+                return Err(Error::Overlong);
+            }
             result |= ((byte & 0x7f) as i64) << shift;
             shift += 7;
             if byte & 0x80 == 0 {
@@ -111,9 +118,6 @@ impl<'a> Reader<'a> {
                     }
                 }
                 return Ok(result);
-            }
-            if shift >= bits + 7 {
-                return Err(Error::Overlong);
             }
         }
     }
@@ -160,6 +164,19 @@ mod tests {
         assert_eq!(Reader::new(&[0x80]).unsigned(32), Err(Error::Truncated));
         assert_eq!(Reader::new(&[]).byte(), Err(Error::Truncated));
         assert_eq!(Reader::new(&[0x02, b'h']).name(), Err(Error::Truncated));
+    }
+
+    #[test]
+    fn an_overlong_i64_is_refused_rather_than_overflowing_a_shift() {
+        // Eleven continuation bytes: the encoding the kernel's panic handler
+        // used to meet. Ten is the most a 64-bit value can need.
+        let bytes = [0x80; 11];
+        assert_eq!(Reader::new(&bytes).signed(64), Err(Error::Overlong));
+        assert_eq!(Reader::new(&[0xff; 12]).signed(64), Err(Error::Overlong));
+        // The longest legal encoding still decodes.
+        let mut legal = [0x80u8; 10];
+        legal[9] = 0x7f;
+        assert!(Reader::new(&legal).signed(64).is_ok());
     }
 
     #[test]

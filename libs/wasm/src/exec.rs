@@ -73,8 +73,12 @@ pub trait Host {
     fn call(&mut self, import: usize, arguments: &[Value]) -> Result<Option<Value>>;
 }
 
-const MAX_STACK: usize = 1024;
-const MAX_FRAMES: usize = 64;
+/// Sized against the kernel heap, not against comfort: the worst case is
+/// MAX_FRAMES nested frames each holding MAX_STACK operands plus labels and
+/// locals, and that product has to stay small beside a 4 MiB heap that does
+/// not coalesce.
+const MAX_STACK: usize = 256;
+const MAX_FRAMES: usize = 32;
 const PAGE_SIZE: usize = 64 * 1024;
 
 pub struct Instance<'a> {
@@ -177,7 +181,10 @@ impl<'a> Instance<'a> {
         returns_value: bool,
     ) -> Result<Option<Value>> {
         let body = function.body.clone();
-        let mut reader = Reader::new(&self.module.bytes[..body.end]);
+        // Bound once: the scanner needs `&mut self.fuel`, which cannot coexist
+        // with borrowing `self.module` at the call site.
+        let bytes = self.module.bytes;
+        let mut reader = Reader::new(&bytes[..body.end]);
         reader.seek(body.start).map_err(|_| Trap::Malformed)?;
 
         let mut stack: Vec<Value> = Vec::new();
@@ -213,7 +220,7 @@ impl<'a> Instance<'a> {
                     let target = if is_loop {
                         reader.position()
                     } else {
-                        find_end(self.module.bytes, reader.position(), body.end)?
+                        find_end(bytes, reader.position(), body.end, &mut self.fuel)?
                     };
                     if opcode == 0x04 {
                         // `if`: consume the condition now.
@@ -221,7 +228,7 @@ impl<'a> Instance<'a> {
                         if condition == 0 {
                             // Jump past the else marker, or past the end.
                             let (else_at, end_at) =
-                                find_else(self.module.bytes, reader.position(), body.end)?;
+                                find_else(bytes, reader.position(), body.end, &mut self.fuel)?;
                             match else_at {
                                 Some(position) => {
                                     reader.seek(position).map_err(|_| Trap::Malformed)?;
@@ -245,7 +252,7 @@ impl<'a> Instance<'a> {
                     // block is finished, so skip the alternative AND close the
                     // label — leaving it open unbalances the control stack and
                     // the function never finds its own `end`.
-                    let end_at = find_end(self.module.bytes, reader.position(), body.end)?;
+                    let end_at = find_end(bytes, reader.position(), body.end, &mut self.fuel)?;
                     reader.seek(end_at).map_err(|_| Trap::Malformed)?;
                     labels.pop().ok_or(Trap::Malformed)?;
                 }
@@ -517,15 +524,20 @@ impl<'a> Instance<'a> {
 /// Scan forward for the `end` that closes the block starting at `position`.
 /// Instruction immediates must be skipped, not merely stepped over, or a
 /// constant that happens to encode 0x0b would look like a block terminator.
-fn find_end(bytes: &[u8], position: usize, limit: usize) -> Result<usize> {
-    let (_, end) = scan(bytes, position, limit, false)?;
+fn find_end(bytes: &[u8], position: usize, limit: usize, fuel: &mut u64) -> Result<usize> {
+    let (_, end) = scan(bytes, position, limit, false, fuel)?;
     Ok(end)
 }
 
 /// Like [`find_end`], but also reports the position just past a top-level
 /// `else`, if there is one.
-fn find_else(bytes: &[u8], position: usize, limit: usize) -> Result<(Option<usize>, usize)> {
-    scan(bytes, position, limit, true)
+fn find_else(
+    bytes: &[u8],
+    position: usize,
+    limit: usize,
+    fuel: &mut u64,
+) -> Result<(Option<usize>, usize)> {
+    scan(bytes, position, limit, true, fuel)
 }
 
 fn scan(
@@ -533,6 +545,7 @@ fn scan(
     position: usize,
     limit: usize,
     want_else: bool,
+    fuel: &mut u64,
 ) -> Result<(Option<usize>, usize)> {
     let mut reader = Reader::new(&bytes[..limit]);
     reader.seek(position).map_err(|_| Trap::Malformed)?;
@@ -540,6 +553,14 @@ fn scan(
     let mut else_at = None;
 
     while reader.position() < limit {
+        // Scanning is metered like everything else. Without this a `block`
+        // inside a `loop` bought a full re-scan of the function body for one
+        // fuel unit — measured at 13 seconds of frozen kernel for a 256 KiB
+        // module that never left its budget.
+        if *fuel == 0 {
+            return Err(Trap::OutOfFuel);
+        }
+        *fuel -= 1;
         let opcode = reader.byte().map_err(|_| Trap::Malformed)?;
         match opcode {
             0x02 | 0x03 | 0x04 => {
