@@ -19,7 +19,7 @@ pub mod acb;
 
 use alloc::vec::Vec;
 
-use nawa_aman::{self as aman, Authority, Capability, Denied};
+use nawa_aman::{self as aman, Authority, Capability, Denied, ModelClass, Risk};
 use nawa_core::apic;
 use nawa_core::cell::SpinLock;
 use nawa_core::vec_lite::SmallVec;
@@ -29,12 +29,26 @@ pub use acb::{Agent, AgentId, Budget, Context, Progress, State};
 
 /// A pending human decision. Irreversible actions park here rather than
 /// proceeding — the consent law made structural.
+///
+/// The binding is the whole point, and every field carries part of it:
+/// an answer authorizes **this agent**, exercising **this capability**,
+/// **once**. An approval that is not bound to what it approves is a blanket
+/// yes with extra steps.
 #[derive(Clone, Copy, Debug)]
 pub struct ApprovalRequest {
     pub id: u64,
     pub agent: AgentId,
+    /// Exactly what may be exercised if the answer is yes.
+    pub capability: Capability,
+    /// What the human is shown — derived by the kernel from the authority,
+    /// never authored by the agent.
     pub what: Label,
+    /// The agent's own words. Untrusted, displayed as such, never the basis
+    /// of a decision.
+    pub note: Label,
     pub answered: Option<bool>,
+    /// Set once the approval has authorized a crossing. One yes, one action.
+    pub consumed: bool,
 }
 
 struct Supervisor {
@@ -124,6 +138,10 @@ pub fn grant(agent: AgentId, authority: Authority) -> Option<Capability> {
 
 /// `delegate(goal, subset, sub_budget)` — spawn a child that holds a strict
 /// subset of the parent's authority and a carved slice of its budget.
+/// Order matters and is the fix for a real defect: **validate first, commit
+/// second.** Carving the budget and spawning the child before checking the
+/// attenuation left a funded, runnable orphan behind whenever the check
+/// failed — and the parent permanently poorer.
 pub fn delegate(
     parent: AgentId,
     goal: &str,
@@ -133,6 +151,10 @@ pub fn delegate(
     wall_microseconds: u64,
     step: fn(&mut Context) -> Progress,
 ) -> Result<AgentId, Denied> {
+    // 1. Would this widen authority? Ask before anything is created.
+    aman::can_delegate(parent, capability, &narrower)?;
+
+    // 2. Can the parent actually fund it?
     let carved = SUPERVISOR.with(|supervisor| {
         let supervisor = supervisor.as_mut().expect("gate::init");
         supervisor
@@ -146,6 +168,7 @@ pub fn delegate(
         return Err(Denied::BudgetExhausted);
     };
 
+    // 3. Now commit. Neither step below can fail.
     let child = spawn(goal, parent, child_budget, wall_microseconds.max(1_000), step);
     let derived = aman::delegate(parent, child, capability, narrower)?;
     SUPERVISOR.with(|supervisor| {
@@ -173,32 +196,33 @@ pub fn attenuate(
     Ok(derived)
 }
 
-/// `invoke(cap, args)` — the only way to touch anything. Charges the budget,
-/// journals the crossing, and refuses (with `NeedsApproval`) anything
-/// irreversible that a human has not answered.
-pub fn invoke(
-    agent: AgentId,
-    capability: Capability,
-    cost_micro_dollars: u64,
-) -> Result<Authority, Denied> {
+/// `invoke(cap, args)` — the only way to touch anything.
+///
+/// The cost is **derived from the authority by the kernel**, never supplied
+/// by the caller: an agent that could price its own actions could spend a
+/// budget without appearing to. Consent is checked against this exact
+/// capability, and a yes is consumed when it is used.
+pub fn invoke(agent: AgentId, capability: Capability) -> Result<Authority, Denied> {
+    // Is there a live, matching, unused approval for exactly this?
     let approved = SUPERVISOR.with(|supervisor| {
         let supervisor = supervisor.as_ref().expect("gate::init");
-        supervisor
-            .agents
-            .iter()
-            .find(|candidate| candidate.id == agent)
-            .and_then(|found| found.awaiting)
-            .and_then(|request| {
-                supervisor
-                    .approvals
-                    .iter()
-                    .find(|approval| approval.id == request)
-                    .and_then(|approval| approval.answered)
-            })
-            .unwrap_or(false)
+        let Some(found) = supervisor.agents.iter().find(|candidate| candidate.id == agent) else {
+            return false;
+        };
+        let Some(request) = found.awaiting else {
+            return false;
+        };
+        supervisor.approvals.iter().any(|approval| {
+            approval.id == request
+                && approval.agent == agent
+                && approval.capability == capability
+                && approval.answered == Some(true)
+                && !approval.consumed
+        })
     });
 
-    let authority = aman::check(agent, capability, approved)?;
+    let authority = aman::authorize(agent, capability, approved)?;
+    let cost = price_of(&authority);
 
     let charged = SUPERVISOR.with(|supervisor| {
         let supervisor = supervisor.as_mut().expect("gate::init");
@@ -207,23 +231,117 @@ pub fn invoke(
             return false;
         };
         found.crossings += 1;
-        if found.budget.remaining_micro_dollars() < cost_micro_dollars {
+        if found.budget.remaining_micro_dollars() < cost {
             found.state = State::Suspended;
             return false;
         }
-        found.budget.spent_micro_dollars += cost_micro_dollars;
+        found.budget.spent_micro_dollars += cost;
+        // Burn the approval: one human yes authorizes one irreversible act.
+        if authority.risk() == Risk::Irreversible {
+            if let Some(request) = found.awaiting.take() {
+                if let Some(approval) =
+                    supervisor.approvals.iter_mut().find(|approval| approval.id == request)
+                {
+                    approval.consumed = true;
+                }
+            }
+        }
         true
     });
     if !charged {
-        sijil::record(agent, sijil::Event::BudgetExhausted, cost_micro_dollars, "suspended");
+        sijil::record(agent, sijil::Event::BudgetExhausted, cost, "suspended");
         return Err(Denied::BudgetExhausted);
     }
+    // Journaled only once the crossing has actually been paid for and
+    // committed — a refused invocation must not read as a completed one.
+    sijil::record(agent, sijil::Event::Invoked, capability.index() as u64, aman::describe(&authority));
     Ok(authority)
 }
 
-/// `approve(action, risk_class)` — raise a consent request. The agent parks;
-/// the answer arrives from the human-facing surface, never from an agent.
-pub fn request_approval(agent: AgentId, what: &str) -> u64 {
+/// The kernel's price list. Crude for now — the point is that the *kernel*
+/// sets it. Model classes will price by tokens once the router exists.
+fn price_of(authority: &Authority) -> u64 {
+    match authority {
+        Authority::Fs { write: false, .. } | Authority::Memory { write: false, .. } => 10,
+        Authority::Fs { write: true, .. } | Authority::Memory { write: true, .. } => 40,
+        Authority::Model { class: ModelClass::Fast } => 50,
+        Authority::Model { class: ModelClass::Private } => 80,
+        Authority::Model { class: ModelClass::Arabic } => 150,
+        Authority::Model { class: ModelClass::Frontier } => 300,
+        Authority::Send { draft_only: true } => 20,
+        Authority::Send { draft_only: false } => 200,
+        // Spending is metered by `spend`, which checks the ceiling itself.
+        Authority::Spend { .. } => 0,
+    }
+}
+
+/// Exercise a `Spend` capability for a specific amount. The capability's own
+/// ceiling is enforced here — an attenuated `Spend` that could be exceeded
+/// would be decoration.
+pub fn spend(agent: AgentId, capability: Capability, micro_dollars: u64) -> Result<(), Denied> {
+    let approved = SUPERVISOR.with(|supervisor| {
+        let supervisor = supervisor.as_ref().expect("gate::init");
+        let Some(found) = supervisor.agents.iter().find(|candidate| candidate.id == agent) else {
+            return false;
+        };
+        let Some(request) = found.awaiting else {
+            return false;
+        };
+        supervisor.approvals.iter().any(|approval| {
+            approval.id == request
+                && approval.agent == agent
+                && approval.capability == capability
+                && approval.answered == Some(true)
+                && !approval.consumed
+        })
+    });
+    let authority = aman::authorize(agent, capability, approved)?;
+    let Authority::Spend { micro_dollars: ceiling } = authority else {
+        return Err(Denied::NotASubset);
+    };
+    if micro_dollars > ceiling {
+        sijil::record(agent, sijil::Event::Denied, micro_dollars, "denied:over-ceiling");
+        return Err(Denied::NotASubset);
+    }
+    let charged = SUPERVISOR.with(|supervisor| {
+        let supervisor = supervisor.as_mut().expect("gate::init");
+        let Some(found) = supervisor.agents.iter_mut().find(|candidate| candidate.id == agent)
+        else {
+            return false;
+        };
+        found.crossings += 1;
+        if found.budget.remaining_micro_dollars() < micro_dollars {
+            found.state = State::Suspended;
+            return false;
+        }
+        found.budget.spent_micro_dollars += micro_dollars;
+        if let Some(request) = found.awaiting.take() {
+            if let Some(approval) =
+                supervisor.approvals.iter_mut().find(|approval| approval.id == request)
+            {
+                approval.consumed = true;
+            }
+        }
+        true
+    });
+    if !charged {
+        sijil::record(agent, sijil::Event::BudgetExhausted, micro_dollars, "suspended");
+        return Err(Denied::BudgetExhausted);
+    }
+    sijil::record(agent, sijil::Event::Invoked, capability.index() as u64, "spend");
+    Ok(())
+}
+
+/// `approve(action, risk_class)` — raise a consent request for one specific
+/// capability. The agent parks; the answer arrives from the human-facing
+/// surface, never from an agent.
+///
+/// The request id is assigned here and recorded on the agent by the kernel:
+/// an agent cannot choose which pending decision it is waiting on, because
+/// choosing would mean borrowing someone else's yes.
+pub fn request_approval(agent: AgentId, capability: Capability, note: &str) -> Result<u64, Denied> {
+    let authority = aman::authority_of(agent, capability)?;
+    let what = aman::describe(&authority);
     let id = SUPERVISOR.with(|supervisor| {
         let supervisor = supervisor.as_mut().expect("gate::init");
         let id = supervisor.next_approval_id;
@@ -231,37 +349,62 @@ pub fn request_approval(agent: AgentId, what: &str) -> u64 {
         supervisor.approvals.push(ApprovalRequest {
             id,
             agent,
+            capability,
             what: Label::new(what),
+            note: Label::new(note),
             answered: None,
+            consumed: false,
         });
+        if let Some(found) = supervisor.agents.iter_mut().find(|a| a.id == agent) {
+            found.awaiting = Some(id);
+        }
         id
     });
-    sijil::record(agent, sijil::Event::ApprovalRequested, id, what);
-    id
+    sijil::record(agent, sijil::Event::ApprovalRequested, capability.index() as u64, what);
+    Ok(id)
 }
 
 /// The human answers. In M1 this is called by the kernel's own console
 /// stand-in; from Phase 2 it is the only thing the consent surface can do.
+///
+/// A rejection is final: the agent is killed rather than left to ask again in
+/// a loop, and its pending request is cleared so nothing can inherit the
+/// decision.
 pub fn answer_approval(request: u64, approved: bool) {
-    let agent = SUPERVISOR.with(|supervisor| {
+    let outcome = SUPERVISOR.with(|supervisor| {
         let supervisor = supervisor.as_mut().expect("gate::init");
-        let mut agent = 0;
-        if let Some(found) = supervisor.approvals.iter_mut().find(|a| a.id == request) {
-            found.answered = Some(approved);
-            agent = found.agent;
+        let Some(found) = supervisor.approvals.iter_mut().find(|a| a.id == request) else {
+            return None;
+        };
+        if found.answered.is_some() {
+            return None; // already decided; answers are not revisited
         }
-        if let Some(found) = supervisor.agents.iter_mut().find(|a| a.id == agent) {
-            if found.state == State::AwaitingConsent {
-                found.state = State::Runnable;
-                found.deadline = apic::now_microseconds();
+        found.answered = Some(approved);
+        let agent = found.agent;
+        let capability = found.capability;
+        if let Some(waiting) = supervisor.agents.iter_mut().find(|a| a.id == agent) {
+            // Only the agent actually parked on THIS request is affected.
+            if waiting.awaiting == Some(request) {
+                if approved {
+                    waiting.state = State::Runnable;
+                    waiting.deadline = apic::now_microseconds();
+                } else {
+                    waiting.awaiting = None;
+                    waiting.state = State::Killed;
+                }
             }
         }
-        agent
+        Some((agent, capability))
     });
+    let Some((agent, capability)) = outcome else {
+        // An answer to nothing is not journaled as a decision — it never
+        // authorized anything.
+        return;
+    };
     sijil::record(
         agent,
         if approved { sijil::Event::Approved } else { sijil::Event::Rejected },
-        request,
+        capability.index() as u64,
         if approved { "human approved" } else { "human rejected" },
     );
 }
@@ -279,7 +422,7 @@ pub fn remember(
     capability: Capability,
     namespace: &str,
 ) -> Result<Authority, Denied> {
-    let authority = invoke(agent, capability, 0)?;
+    let authority = invoke(agent, capability)?;
     sijil::record(agent, sijil::Event::Remembered, 0, namespace);
     Ok(authority)
 }
@@ -317,6 +460,7 @@ pub fn run_until_idle(max_steps: u64) -> u64 {
         let progress = step(&mut context);
         let elapsed = apic::now_microseconds().saturating_sub(started);
 
+        let mut suspended_by_budget = false;
         let suspended = SUPERVISOR.with(|supervisor| {
             let supervisor = supervisor.as_mut().expect("gate::init");
             let Some(found) = supervisor.agents.iter_mut().find(|candidate| candidate.id == id)
@@ -338,15 +482,17 @@ pub fn run_until_idle(max_steps: u64) -> u64 {
                 Progress::Continue => {
                     if found.budget.exhausted() {
                         found.state = State::Suspended;
+                        suspended_by_budget = true;
                         return true;
                     }
                     // Round-robin among ready agents by pushing the deadline
                     // just past the others'.
                     found.deadline = apic::now_microseconds() + 1;
                 }
-                Progress::AwaitConsent(request) => {
+                Progress::AwaitConsent => {
+                    // `awaiting` was set by request_approval; the agent only
+                    // reports that it is parked, never on what.
                     found.state = State::AwaitingConsent;
-                    found.awaiting = Some(request);
                 }
                 Progress::Done => found.state = State::Finished,
                 Progress::Failed => found.state = State::Killed,
@@ -355,6 +501,11 @@ pub fn run_until_idle(max_steps: u64) -> u64 {
         });
 
         if suspended {
+            // A terminal state is never silent: an agent stopped by its
+            // budget leaves the same trail as one that finished.
+            if suspended_by_budget {
+                sijil::record(id, sijil::Event::BudgetExhausted, 0, "suspended at step end");
+            }
             continue;
         }
         match progress {
@@ -421,6 +572,19 @@ pub fn pending_approvals() -> Vec<ApprovalRequest> {
     SUPERVISOR.with(|supervisor| {
         let supervisor = supervisor.as_ref().expect("gate::init");
         supervisor.approvals.iter().filter(|a| a.answered.is_none()).copied().collect()
+    })
+}
+
+/// Look up one of an agent's capabilities by slot — for the kernel's own
+/// tests and, later, the shell's inspector.
+pub fn capability_of(agent: AgentId, slot: usize) -> Option<Capability> {
+    SUPERVISOR.with(|supervisor| {
+        let supervisor = supervisor.as_ref().expect("gate::init");
+        supervisor
+            .agents
+            .iter()
+            .find(|candidate| candidate.id == agent)
+            .and_then(|found| found.capabilities.get(slot))
     })
 }
 

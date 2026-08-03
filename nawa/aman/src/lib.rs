@@ -42,10 +42,45 @@ pub enum Authority {
     Spend { micro_dollars: u64 },
 }
 
-/// A path prefix, fixed-size so capabilities never allocate.
-pub type Prefix = sijil::Label;
-/// A DHAKIRA namespace name.
-pub type Namespace = sijil::Label;
+/// A path or namespace scope. Fixed-size so capabilities never allocate —
+/// and **fallibly constructed**, because a truncated scope is a *wider* one:
+/// silently shortening `/projects/very/long/path` to `/projects/very/lo`
+/// would hand out authority over everything beneath the shorter prefix. A
+/// scope that does not fit is refused, never trimmed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Scope(sijil::Label);
+
+impl Scope {
+    pub fn new(text: &str) -> Option<Scope> {
+        sijil::Label::exact(text).map(Scope)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Is `self` inside `parent`? A textual prefix is not a path prefix:
+    /// `/inbox-archive` starts with `/inbox` but is a sibling, not a child.
+    /// Containment requires the match to end at a component boundary.
+    pub fn is_within(&self, parent: &Scope) -> bool {
+        let (child, parent) = (self.as_str(), parent.as_str());
+        let Some(rest) = child.strip_prefix(parent) else {
+            return false;
+        };
+        rest.is_empty() || parent.ends_with('/') || rest.starts_with('/')
+    }
+}
+
+impl core::fmt::Debug for Scope {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A filesystem path scope.
+pub type Prefix = Scope;
+/// A DHAKIRA namespace scope.
+pub type Namespace = Scope;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ModelClass {
@@ -89,17 +124,12 @@ impl Authority {
             (
                 Authority::Fs { prefix: child, write: child_write },
                 Authority::Fs { prefix: parent_prefix, write: parent_write },
-            ) => {
-                child.as_str().starts_with(parent_prefix.as_str())
-                    && (!child_write || *parent_write)
-            }
+            ) => child.is_within(parent_prefix) && (!child_write || *parent_write),
             (Authority::Model { class: a }, Authority::Model { class: b }) => a == b,
             (
                 Authority::Memory { namespace: child, write: child_write },
                 Authority::Memory { namespace: parent_ns, write: parent_write },
-            ) => {
-                child.as_str().starts_with(parent_ns.as_str()) && (!child_write || *parent_write)
-            }
+            ) => child.is_within(parent_ns) && (!child_write || *parent_write),
             (Authority::Send { draft_only: child }, Authority::Send { draft_only: parent }) => {
                 *child || !*parent
             }
@@ -145,13 +175,16 @@ pub fn init_table() {
 }
 
 /// Mint root authority. Kernel-only: this is the one place authority enters
-/// the system, and it is never reachable from an agent.
+/// the system, and it is never reachable from an agent — so it is also the
+/// one place a journal entry must never be skipped.
 pub fn mint(holder: u32, authority: Authority) -> Capability {
-    TABLE.with(|table| {
+    let capability = TABLE.with(|table| {
         let table = table.as_mut().expect("aman::init");
         table.slots.push(Slot { authority, holder, parent: None, revoked: false });
         Capability(table.slots.len() - 1)
-    })
+    });
+    sijil::record(holder, sijil::Event::Granted, capability.0 as u64, describe(&authority));
+    capability
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -212,6 +245,27 @@ pub fn attenuate(
     }
 }
 
+/// Would this delegation be legal? A pure check with no side effects, so the
+/// gate can validate before it commits budget or creates an agent.
+pub fn can_delegate(
+    parent_agent: u32,
+    capability: Capability,
+    narrower: &Authority,
+) -> Result<(), Denied> {
+    let result = TABLE.with(|table| {
+        let table = table.as_ref().expect("aman::init");
+        let slot = lookup(table, capability, parent_agent)?;
+        if !narrower.is_subset_of(&slot.authority) {
+            return Err(Denied::NotASubset);
+        }
+        Ok(())
+    });
+    if result.is_err() {
+        sijil::record(parent_agent, sijil::Event::Denied, capability.0 as u64, describe(narrower));
+    }
+    result
+}
+
 /// Hand a capability to a child agent, narrowing it on the way. This is the
 /// only route by which a child gains authority.
 pub fn delegate(
@@ -246,14 +300,14 @@ pub fn delegate(
     }
 }
 
-/// Check a capability and journal the crossing. `approved` carries a prior
-/// human decision; without it, irreversible authority is refused — the
+/// Authorize a capability. `approved` carries a prior human decision bound to
+/// this exact capability; without it, irreversible authority is refused — the
 /// consent law, enforced at the gate rather than by convention.
-pub fn check(
-    agent: u32,
-    capability: Capability,
-    approved: bool,
-) -> Result<Authority, Denied> {
+///
+/// Denials are journaled here. **Success is not**: the caller journals the
+/// crossing only once it has been paid for and committed, so the record never
+/// shows an action that the gate went on to refuse.
+pub fn authorize(agent: u32, capability: Capability, approved: bool) -> Result<Authority, Denied> {
     let result = TABLE.with(|table| {
         let table = table.as_ref().expect("aman::init");
         let slot = lookup(table, capability, agent)?;
@@ -262,21 +316,24 @@ pub fn check(
         }
         Ok(slot.authority)
     });
-    match result {
-        Ok(authority) => {
-            sijil::record(agent, sijil::Event::Invoked, capability.0 as u64, describe(&authority));
-            Ok(authority)
-        }
-        Err(denied) => {
-            let event = if denied == Denied::NeedsApproval {
-                sijil::Event::ApprovalRequested
-            } else {
-                sijil::Event::Denied
-            };
-            sijil::record(agent, event, capability.0 as u64, denied_label(denied));
-            Err(denied)
-        }
+    if let Err(denied) = result {
+        let event = if denied == Denied::NeedsApproval {
+            sijil::Event::ApprovalRequested
+        } else {
+            sijil::Event::Denied
+        };
+        sijil::record(agent, event, capability.0 as u64, denied_label(denied));
     }
+    result
+}
+
+/// Read a capability's authority without exercising it — for describing a
+/// consent request in the kernel's own words rather than the agent's.
+pub fn authority_of(agent: u32, capability: Capability) -> Result<Authority, Denied> {
+    TABLE.with(|table| {
+        let table = table.as_ref().expect("aman::init");
+        Ok(lookup(table, capability, agent)?.authority)
+    })
 }
 
 /// Revoke a capability and everything derived from it, transitively.

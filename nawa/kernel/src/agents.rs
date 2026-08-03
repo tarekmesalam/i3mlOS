@@ -23,7 +23,7 @@ pub fn file_invoices(context: &mut Context) -> Progress {
         // Step 0: read the inbox. Benign, no consent needed.
         0 => {
             *context.cursor += 1;
-            match read.map(|cap| gate::invoke(context.id, cap, 120)) {
+            match read.map(|cap| gate::invoke(context.id, cap)) {
                 Some(Ok(_)) => Progress::Continue,
                 _ => Progress::Failed,
             }
@@ -31,31 +31,34 @@ pub fn file_invoices(context: &mut Context) -> Progress {
         // Step 1: file them (still reversible — staged, undoable).
         1 => {
             *context.cursor += 1;
-            match read.map(|cap| gate::invoke(context.id, cap, 80)) {
+            match read.map(|cap| gate::invoke(context.id, cap)) {
                 Some(Ok(_)) => Progress::Continue,
                 _ => Progress::Failed,
             }
         }
         // Step 2: sending is irreversible. The gate refuses it without a
-        // human answer, so the agent parks rather than pushing through.
+        // human answer bound to this very capability, so the agent parks.
         2 => {
             *context.cursor += 1;
-            match send.map(|cap| gate::invoke(context.id, cap, 0)) {
-                Some(Err(Denied::NeedsApproval)) => {
-                    let request = gate::request_approval(context.id, "send 3 reminder emails");
-                    Progress::AwaitConsent(request)
+            let Some(cap) = send else { return Progress::Failed };
+            match gate::invoke(context.id, cap) {
+                Err(Denied::NeedsApproval) => {
+                    // The note is the agent's words; what the human is shown
+                    // is the kernel's description of `cap`.
+                    match gate::request_approval(context.id, cap, "send 3 reminder emails") {
+                        Ok(_) => Progress::AwaitConsent,
+                        Err(_) => Progress::Failed,
+                    }
                 }
-                Some(Ok(_)) => Progress::Continue,
-                _ => Progress::Failed,
+                Ok(_) => Progress::Continue,
+                Err(_) => Progress::Failed,
             }
         }
-        // Step 3: reached only after a human said yes.
-        _ => {
-            match send.map(|cap| gate::invoke(context.id, cap, 200)) {
-                Some(Ok(_)) => Progress::Done,
-                _ => Progress::Failed,
-            }
-        }
+        // Step 3: reached only after a human said yes to THIS capability.
+        _ => match send.map(|cap| gate::invoke(context.id, cap)) {
+            Some(Ok(_)) => Progress::Done,
+            _ => Progress::Failed,
+        },
     }
 }
 
@@ -66,7 +69,7 @@ pub fn summarize(context: &mut Context) -> Progress {
     let Some(capability) = context.capabilities.get(0) else {
         return Progress::Failed;
     };
-    match gate::invoke(context.id, capability, 40) {
+    match gate::invoke(context.id, capability) {
         Ok(_) => Progress::Done,
         Err(_) => Progress::Failed,
     }
@@ -80,7 +83,7 @@ pub fn spendthrift(context: &mut Context) -> Progress {
     let Some(capability) = context.capabilities.get(0) else {
         return Progress::Failed;
     };
-    match gate::invoke(context.id, capability, 300) {
+    match gate::invoke(context.id, capability) {
         Ok(_) | Err(Denied::BudgetExhausted) => Progress::Continue,
         Err(_) => Progress::Failed,
     }
@@ -89,7 +92,13 @@ pub fn spendthrift(context: &mut Context) -> Progress {
 /// Authorities the demo hands out. Root authority is minted by the kernel;
 /// agents can only ever narrow it from here.
 pub fn root_read() -> Authority {
-    Authority::Fs { prefix: nawa_sijil::Label::new("/inbox"), write: false }
+    Authority::Fs { prefix: scope("/inbox"), write: false }
+}
+
+/// Scopes are fallible by design — a path that will not fit is refused, not
+/// truncated into a broader one. The demo's paths are short and known.
+fn scope(text: &str) -> nawa_aman::Scope {
+    nawa_aman::Scope::new(text).expect("demo scope fits")
 }
 
 pub fn root_send() -> Authority {
@@ -97,7 +106,13 @@ pub fn root_send() -> Authority {
 }
 
 pub fn narrowed_read() -> Authority {
-    Authority::Fs { prefix: nawa_sijil::Label::new("/inbox/invoices"), write: false }
+    Authority::Fs { prefix: scope("/inbox/invoices"), write: false }
+}
+
+/// A sibling that merely *starts with* the granted prefix. Textually it looks
+/// narrower; it is not inside the subtree, and must be refused.
+pub fn sibling_read() -> Authority {
+    Authority::Fs { prefix: scope("/inbox-archive"), write: false }
 }
 
 pub fn model_arabic() -> Authority {

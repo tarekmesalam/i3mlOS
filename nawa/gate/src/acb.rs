@@ -51,9 +51,20 @@ impl Budget {
 
     /// Carve a child's budget out of what remains. Returns None if the parent
     /// cannot cover it — a child is never funded on credit.
+    ///
+    /// **Both** resources are carved. Deducting money while conjuring wall
+    /// time from nothing would let a subtree outlast its root, which is the
+    /// same defect as outspending it.
     pub fn carve(&mut self, micro_dollars: u64, wall_microseconds: u64) -> Option<Budget> {
         if micro_dollars > self.remaining_micro_dollars() {
             return None;
+        }
+        if self.wall_microseconds != 0 {
+            let remaining_wall = self.wall_microseconds.saturating_sub(self.used_microseconds);
+            if wall_microseconds == 0 || wall_microseconds > remaining_wall {
+                return None;
+            }
+            self.used_microseconds += wall_microseconds;
         }
         self.spent_micro_dollars += micro_dollars;
         Some(Budget::new(micro_dollars, wall_microseconds))
@@ -90,9 +101,9 @@ pub struct Agent {
 pub enum Progress {
     /// More to do; reschedule.
     Continue,
-    /// Parked waiting for a human. The supervisor will not run it again
-    /// until the answer arrives.
-    AwaitConsent(u64),
+    /// Parked waiting for a human. Which request it waits on is kernel
+    /// state, set by `request_approval` — never named by the agent.
+    AwaitConsent,
     Done,
     Failed,
 }

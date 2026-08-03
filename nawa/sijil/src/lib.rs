@@ -25,6 +25,9 @@ pub enum Event {
     Delegated,
     /// A capability was narrowed. `detail` = derived capability index.
     Attenuated,
+    /// Root authority was minted for an agent — the only way authority enters
+    /// the system. `detail` = capability index.
+    Granted,
     /// A capability was exercised. `detail` = capability index.
     Invoked,
     /// A capability check said no. `detail` = capability index (or 0).
@@ -81,6 +84,17 @@ impl Label {
             length += width;
         }
         Label { bytes, length: length as u8 }
+    }
+
+    /// Build a label that must represent the text **exactly**, or not at all.
+    /// Journal labels may be trimmed for display; anything a security
+    /// decision reads (a path, a namespace) must use this instead, because a
+    /// shortened scope is a broader scope.
+    pub fn exact(text: &str) -> Option<Label> {
+        if text.len() > Self::CAPACITY {
+            return None;
+        }
+        Some(Label::new(text))
     }
 
     pub fn as_str(&self) -> &str {

@@ -164,6 +164,17 @@ fn run_first_agents(out: &mut SerialWriter) {
             let _ = writeln!(out, "aman: ATTENUATION LAW BROKEN: {other:?}");
         }
     }
+    // The subtler attack, found by review: a sibling path that merely shares
+    // a textual prefix. "/inbox-archive" starts with "/inbox" but is not
+    // inside it, and a string prefix test would have granted it.
+    match gate::attenuate(filer, read, agents::sibling_read()) {
+        Err(nawa_aman::Denied::NotASubset) => {
+            let _ = writeln!(out, "aman: refused /inbox-archive as a child of /inbox — correct");
+        }
+        other => {
+            let _ = writeln!(out, "aman: PATH BOUNDARY LAW BROKEN: {other:?}");
+        }
+    }
 
     // --- Law 4: a greedy agent on a small budget ---
     let greedy = gate::spawn("spend everything", 0, Budget::new(500, 0), 5_000, agents::spendthrift);
@@ -173,13 +184,14 @@ fn run_first_agents(out: &mut SerialWriter) {
     let completed = gate::run_until_idle(64);
     let _ = writeln!(out, "sched: {completed} agents reached a terminal state");
 
-    // --- Law 3: the human decides ---
+    // --- Law 3: the human decides, once, about one thing ---
     for request in gate::pending_approvals() {
         let _ = writeln!(
             out,
-            "consent: agent {} parked awaiting approval — \"{}\"",
+            "consent: agent {} parked awaiting approval — kernel says \"{}\", agent says \"{}\"",
             request.agent,
-            request.what.as_str()
+            request.what.as_str(),
+            request.note.as_str(),
         );
         // Stand-in for the consent surface; from Phase 2 only the kernel-owned
         // UI can call this.
@@ -187,6 +199,20 @@ fn run_first_agents(out: &mut SerialWriter) {
     }
     let completed = gate::run_until_idle(64);
     let _ = writeln!(out, "sched: {completed} more agents finished after consent");
+
+    // The approval was spent on the send it named. Asking again with the same
+    // capability must park again, not ride the answered request — the defect
+    // an adversarial review found before any user could.
+    if let Some(send) = gate::capability_of(filer, 1) {
+        match gate::invoke(filer, send) {
+            Err(nawa_aman::Denied::NeedsApproval) => {
+                let _ = writeln!(out, "consent: second send refused — one yes, one action");
+            }
+            other => {
+                let _ = writeln!(out, "consent: CONSENT LAW BROKEN: {other:?}");
+            }
+        }
+    }
 
     // --- What the shell will one day show: `i3ml ps` ---
     for agent in gate::summaries() {

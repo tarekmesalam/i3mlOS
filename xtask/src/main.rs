@@ -18,7 +18,7 @@ const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const HELLO_LINE: &str = "hello from the i3ml kernel";
 /// Every marker must appear on serial for the boot test to pass. Each one is
 /// a law the kernel claims to enforce, asserted on every commit.
-const MARKERS: [&str; 15] = [
+const MARKERS: [&str; 17] = [
     HELLO_LINE,
     "nawa: exit_boot_services ok",
     "int3: breakpoint handled",
@@ -34,6 +34,8 @@ const MARKERS: [&str; 15] = [
     "gate crossing(s) from ring 3",           // untrusted code reached the kernel
     "resident faulted reaching",              // and could not reach kernel memory
     "isolation is hardware now",              // the claim is the CPU's, not ours
+    "refused /inbox-archive",                 // path prefixes end at boundaries
+    "one yes, one action",                    // consent is bound and consumed
 ];
 /// isa-debug-exit: (0x10 << 1) | 1 — must match nawa_core::qemu::EXIT_SUCCESS.
 const QEMU_SUCCESS_STATUS: i32 = 33;
