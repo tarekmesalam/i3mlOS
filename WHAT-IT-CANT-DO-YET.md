@@ -28,7 +28,15 @@ Honesty page, updated every release. Today the kernel:
   import list *before* it executes. A module that imports a verb it was not
   granted is refused at load, so an unauthorized call is unreachable rather
   than merely denied.
-- **Cannot:** run WASM modules in the yard yet (the interpreter is still
+- **Can (M4):** find its own hardware (PCI configuration space), bring up
+  **virtio** devices over the modern 1.0 transport, and drive two of them:
+  **virtio-rng** for entropy it cannot invent, and **virtio-blk** — it writes
+  a sector, reads it back, and flushes it. Device registers are mapped on
+  demand, which they must be: a virtio BAR under OVMF sits at 768 GiB.
+- **Cannot:** use the disk for anything yet (there is no filesystem, and
+  SIJIL is still a ring in RAM — persisting it is next), take device
+  interrupts (drivers poll), drive a network card or a console device,
+  run WASM modules in the yard yet (the interpreter is still
   kernel-side; moving it into ring 3 is the next step), checkpoint a running
   module (the state is data by construction, but nothing serializes it yet),
   handle floats, tables, globals, or `br_table` (outside the subset, refused

@@ -17,6 +17,7 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::cell::StaticCell;
 use crate::mem;
 use crate::uefi::{MemoryMap, PAGE_SIZE};
 
@@ -42,6 +43,9 @@ const DEVICE_WINDOW: u64 = 0xf000_0000;
 pub const YARD_BASE: u64 = 0x0000_1000_0000_0000;
 
 static PML4_PHYSICAL: AtomicU64 = AtomicU64::new(0);
+/// How much physical memory the identity map covers. Everything that pokes
+/// hardware checks against this, so a bad address is refused, not wild.
+static MAPPED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 fn allocate_table() -> Option<u64> {
     let frame = mem::allocate_frames(1)? as u64;
@@ -102,6 +106,7 @@ pub(crate) fn init(map: MemoryMap, framebuffer_end: u64) -> u64 {
     }
 
     PML4_PHYSICAL.store(pml4, Ordering::Relaxed);
+    MAPPED_BYTES.store(gibibytes * GIB, Ordering::Relaxed);
     unsafe {
         asm!("mov cr3, {}", in(reg) pml4, options(nostack, preserves_flags));
     }
@@ -155,6 +160,93 @@ fn flush(virtual_address: u64) {
     unsafe {
         asm!("invlpg [{}]", in(reg) virtual_address, options(nostack, preserves_flags));
     }
+}
+
+/// Device registers can live far outside RAM: a virtio BAR under OVMF lands
+/// at 768 GiB, which no sane identity map reaches. Rather than mapping half a
+/// terabyte, the kernel maps device windows on demand and remembers them, so
+/// [`crate::mmio`] can still tell a legitimate register from a wild address.
+const MAX_DEVICE_WINDOWS: usize = 8;
+static DEVICE_WINDOWS: StaticCell<[(u64, u64); MAX_DEVICE_WINDOWS]> =
+    StaticCell::new([(0, 0); MAX_DEVICE_WINDOWS]);
+static DEVICE_WINDOW_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Identity-map a device's registers, cache-disabled. 2 MiB pages, allocating
+/// whatever intermediate tables the address needs — a BAR may sit in a
+/// PML4 slot the identity map never touched.
+pub fn map_device(physical: u64, length: usize) -> bool {
+    let pml4 = PML4_PHYSICAL.load(Ordering::Relaxed);
+    if pml4 == 0 || length == 0 {
+        return false;
+    }
+    let start = physical & !(HUGE_PAGE_SIZE - 1);
+    let Some(end) = physical.checked_add(length as u64) else {
+        return false;
+    };
+    let end = end.div_ceil(HUGE_PAGE_SIZE) * HUGE_PAGE_SIZE;
+
+    let mut page = start;
+    while page < end {
+        let pml4_index = (page >> 39) as usize & 0x1ff;
+        let pdpt_index = (page >> 30) as usize & 0x1ff;
+        let directory_index = (page >> 21) as usize & 0x1ff;
+
+        let existing = entry(pml4, pml4_index);
+        let pdpt = if existing & PRESENT == 0 {
+            let Some(fresh) = allocate_table() else { return false };
+            set_entry(pml4, pml4_index, fresh | PRESENT | WRITABLE);
+            fresh
+        } else {
+            existing & ADDRESS_MASK
+        };
+
+        let existing = entry(pdpt, pdpt_index);
+        let directory = if existing & PRESENT == 0 {
+            let Some(fresh) = allocate_table() else { return false };
+            set_entry(pdpt, pdpt_index, fresh | PRESENT | WRITABLE);
+            fresh
+        } else {
+            existing & ADDRESS_MASK
+        };
+
+        set_entry(
+            directory,
+            directory_index,
+            page | PRESENT | WRITABLE | HUGE | CACHE_DISABLE | WRITE_THROUGH,
+        );
+        page += HUGE_PAGE_SIZE;
+    }
+
+    let count = DEVICE_WINDOW_COUNT.load(Ordering::Relaxed) as usize;
+    if count < MAX_DEVICE_WINDOWS {
+        unsafe {
+            (*DEVICE_WINDOWS.get())[count] = (start, end);
+        }
+        DEVICE_WINDOW_COUNT.store(count as u64 + 1, Ordering::Relaxed);
+    }
+    // Reload CR3 rather than tracking every page: mapping devices happens
+    // a handful of times at bring-up, and correctness beats cleverness.
+    unsafe {
+        let value: u64;
+        asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags));
+        asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags));
+    }
+    true
+}
+
+/// Is this range inside a device window the kernel deliberately mapped?
+pub fn in_device_window(address: u64, length: usize) -> bool {
+    let Some(end) = address.checked_add(length as u64) else {
+        return false;
+    };
+    let count = DEVICE_WINDOW_COUNT.load(Ordering::Relaxed) as usize;
+    let windows = unsafe { *DEVICE_WINDOWS.get() };
+    windows.iter().take(count).any(|(start, stop)| address >= *start && end <= *stop)
+}
+
+/// Upper bound of the identity map, in bytes.
+pub fn mapped_bytes() -> u64 {
+    MAPPED_BYTES.load(Ordering::Relaxed)
 }
 
 pub fn active() -> bool {

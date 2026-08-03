@@ -14,4 +14,5 @@ nawa-core = { path = "../core" }
 nawa-sijil = { path = "../sijil" }
 nawa-aman = { path = "../aman" }
 nawa-gate = { path = "../gate" }
+nawa-virtio = { path = "../virtio" }
 i3ml-wasm = { path = "../../libs/wasm" }

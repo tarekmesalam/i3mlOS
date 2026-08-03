@@ -30,7 +30,11 @@ mod idt;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod mem;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+pub mod mmio;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 pub mod paging;
+#[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
+pub mod pci;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 mod panic;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi"))]

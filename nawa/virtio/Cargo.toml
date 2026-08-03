@@ -1,0 +1,9 @@
+[package]
+name = "nawa-virtio"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "VirtIO 1.0 transport and split virtqueues, written from scratch — the kernel's only device interface"
+
+[dependencies]
+nawa-core = { path = "../core" }

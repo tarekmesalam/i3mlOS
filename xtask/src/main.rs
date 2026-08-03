@@ -18,7 +18,7 @@ const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const HELLO_LINE: &str = "hello from the i3ml kernel";
 /// Every marker must appear on serial for the boot test to pass. Each one is
 /// a law the kernel claims to enforce, asserted on every commit.
-const MARKERS: [&str; 20] = [
+const MARKERS: [&str; 23] = [
     HELLO_LINE,
     "nawa: exit_boot_services ok",
     "int3: breakpoint handled",
@@ -39,6 +39,9 @@ const MARKERS: [&str; 20] = [
     "wasm: module decoded",                   // agents can be written, not compiled in
     "refused to load — imports invoke",        // the manifest is checked before the code runs
     "an agent is a module now",               // ...and then it runs
+    "virtio device",                          // the kernel finds real hardware
+    "bytes of real entropy",                  // randomness it did not invent
+    "storage works",                          // and a disk that answers
 ];
 /// isa-debug-exit: (0x10 << 1) | 1 — must match nawa_core::qemu::EXIT_SUCCESS.
 const QEMU_SUCCESS_STATUS: i32 = 33;
@@ -152,6 +155,15 @@ fn qemu_command_with_cpu(
     qemu.arg("-drive").arg(format!("if=pflash,format=raw,readonly=on,file={}", firmware.code.display()));
     qemu.arg("-drive").arg(format!("if=pflash,format=raw,file={}", vars_copy.display()));
     qemu.arg("-drive").arg(format!("format=raw,file=fat:rw:{}", esp.display()));
+    // Real devices for the kernel to drive: entropy it cannot invent, and a
+    // disk that outlives the boot.
+    qemu.args(["-device", "virtio-rng-pci"]);
+    let disk = repo_root().join("target").join("i3mlos-disk.img");
+    if !disk.exists() {
+        let _ = fs::write(&disk, vec![0u8; 16 * 1024 * 1024]);
+    }
+    qemu.arg("-drive").arg(format!("if=none,id=i3mldisk,format=raw,file={}", disk.display()));
+    qemu.args(["-device", "virtio-blk-pci,drive=i3mldisk"]);
     if headless {
         qemu.args(["-display", "none"]);
     }

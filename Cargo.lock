@@ -36,10 +36,18 @@ dependencies = [
  "nawa-core",
  "nawa-gate",
  "nawa-sijil",
+ "nawa-virtio",
 ]
 
 [[package]]
 name = "nawa-sijil"
+version = "0.0.1"
+dependencies = [
+ "nawa-core",
+]
+
+[[package]]
+name = "nawa-virtio"
 version = "0.0.1"
 dependencies = [
  "nawa-core",

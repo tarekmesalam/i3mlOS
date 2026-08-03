@@ -90,8 +90,9 @@ fn kmain(boot: BootInfo) -> ! {
     run_first_agents(&mut out);
     run_the_yard(&mut out);
     run_a_wasm_agent(&mut out);
+    bring_up_devices(&mut out);
 
-    serial::write_str("nawa: M3 complete, parking\n");
+    serial::write_str("nawa: M4 complete, parking\n");
     qemu::exit(qemu::EXIT_SUCCESS);
     entry::park()
 }
@@ -251,6 +252,90 @@ fn run_first_agents(out: &mut SerialWriter) {
         );
     });
     let _ = writeln!(out, "agents: first agent scheduled by an original kernel — i3mel");
+}
+
+/// The first real hardware i3mlOS drives. Two devices, chosen for what they
+/// unlock rather than for difficulty: entropy the kernel cannot invent for
+/// itself, and a disk — the thing that turns the journal from a ring in RAM
+/// into a record that survives the power going out.
+fn bring_up_devices(out: &mut SerialWriter) {
+    let mut found = 0;
+    nawa_core::pci::scan(|device| {
+        if device.vendor == nawa_virtio::transport::VENDOR_VIRTIO {
+            found += 1;
+            let _ = writeln!(
+                out,
+                "pci: virtio device {:#06x} at {}:{}.{}",
+                device.device, device.address.bus, device.address.slot, device.address.function
+            );
+        }
+    });
+    let _ = writeln!(out, "pci: {found} virtio device(s) on the bus");
+
+    match nawa_virtio::entropy::Entropy::open() {
+        Some(mut entropy) => {
+            let mut bytes = [0u8; 16];
+            match entropy.read(&mut bytes) {
+                Some(count) if count > 0 => {
+                    let _ = write!(out, "virtio-rng: {count} bytes of real entropy —");
+                    for byte in bytes.iter().take(count.min(8)) {
+                        let _ = write!(out, " {byte:02x}");
+                    }
+                    let _ = writeln!(out);
+                }
+                _ => {
+                    let _ = writeln!(out, "virtio-rng: device answered with nothing");
+                }
+            }
+        }
+        None => {
+            let _ = writeln!(out, "virtio-rng: absent");
+        }
+    }
+
+    match nawa_virtio::block::Block::open() {
+        Some(mut disk) => {
+            let _ = writeln!(
+                out,
+                "virtio-blk: {} sectors ({} MiB)",
+                disk.sectors,
+                disk.sectors * 512 / (1024 * 1024)
+            );
+            // Write a sector, read it back, and compare. Until this round
+            // trip works, nothing the kernel remembers outlives a reboot.
+            let mut written = [0u8; nawa_virtio::block::SECTOR_SIZE];
+            let greeting = b"i3mlOS SIJIL sector 0 -- i3mel";
+            written[..greeting.len()].copy_from_slice(greeting);
+            written[greeting.len()] = boot_marker();
+
+            if !disk.write_sector(0, &written) {
+                let _ = writeln!(out, "virtio-blk: write REFUSED");
+                return;
+            }
+            let mut read_back = [0u8; nawa_virtio::block::SECTOR_SIZE];
+            if !disk.read_sector(0, &mut read_back) {
+                let _ = writeln!(out, "virtio-blk: read REFUSED");
+                return;
+            }
+            if read_back[..greeting.len()] == greeting[..] {
+                let _ = writeln!(out, "virtio-blk: wrote and read back sector 0 — storage works");
+            } else {
+                let _ = writeln!(out, "virtio-blk: READ BACK MISMATCH");
+            }
+            if disk.flush() {
+                let _ = writeln!(out, "virtio-blk: flushed — the write is on the disk, not in a promise");
+            }
+        }
+        None => {
+            let _ = writeln!(out, "virtio-blk: absent");
+        }
+    }
+}
+
+/// A byte that differs per boot, so a sector written now is distinguishable
+/// from one written last time.
+fn boot_marker() -> u8 {
+    (apic::ticks() & 0xff) as u8
 }
 
 /// Run an agent that is a WebAssembly module. Two things are proven here:
