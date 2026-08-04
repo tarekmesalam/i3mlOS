@@ -1,0 +1,9 @@
+[package]
+name = "i3ml-gpt"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "Reading a GUID partition table — how the kernel finds its own storage instead of assuming where it is"
+
+[dependencies]
+i3ml-journal = { path = "../journal" }

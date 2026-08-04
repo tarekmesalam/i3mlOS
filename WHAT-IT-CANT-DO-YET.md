@@ -38,7 +38,14 @@ Honesty page, updated every release. Today the kernel:
   happened this time, and commits. A record edited or truncated on disk
   stops verifying and is refused rather than believed. SHA-256 is ours,
   checked against the published vectors.
-- **Cannot:** survive an attacker who owns the disk and rewrites the whole
+- **Can (M6):** ship as **one bootable disk image**. `cargo xtask disk`
+  writes a GPT disk — an EFI system partition holding the kernel, and a
+  partition the kernel finds *by its type GUID* rather than by an assumed
+  offset. The image builder (CRC-32, GPT, FAT32) is part of this repo, so the
+  build needs no `mkfs`, no `sudo`, and no Linux. CI builds the image, boots
+  it twice, and publishes it as an artifact.
+- **Cannot:** boot on real hardware (this is a VM image: virtio devices, no
+  bare-metal drivers), survive an attacker who owns the disk and rewrites the whole
   chain (that needs a signature, and it is a later milestone — the chain
   detects corruption and tampering-in-place, not a full forgery), store
   anything but the journal (there is no filesystem yet), take device

@@ -92,10 +92,9 @@ impl Host for GateHost {
 
 #[derive(Debug)]
 pub enum LoadError {
-    /// The bytes are not a module we can run.
-    Rejected,
     /// The module imports something outside the gate's vocabulary, or
-    /// something this agent was not granted.
+    /// something this agent was not granted. (Bytes that are not a module at
+    /// all fail earlier, in the decoder.)
     UnauthorizedImport,
 }
 

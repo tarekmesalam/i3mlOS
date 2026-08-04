@@ -12,6 +12,7 @@
 
 use core::fmt::Write;
 
+use i3ml_gpt::Window;
 use i3ml_journal::{Fault, Journal, Record, Sectors};
 use nawa_core::serial::SerialWriter;
 use nawa_sijil as sijil;
@@ -22,6 +23,13 @@ use nawa_virtio::block::{Block, SECTOR_SIZE};
 struct Disk {
     device: Block,
 }
+
+/// The partition type that says "the journal lives here". Written by the
+/// image builder, read back by the kernel — neither side assumes an offset.
+pub const JOURNAL_PARTITION: [u8; 16] = [
+    0x6c, 0x6d, 0x33, 0x69, 0x53, 0x00, 0x4c, 0x4a, 0xa1, 0x00, 0x69, 0x33, 0x6d, 0x6c, 0x4f,
+    0x53,
+];
 
 impl Sectors for Disk {
     fn sector_count(&self) -> u64 {
@@ -66,7 +74,92 @@ fn event_code(event: sijil::Event) -> u8 {
 pub fn run(device: Block, out: &mut SerialWriter) {
     let mut disk = Disk { device };
 
-    let mut journal = match Journal::open(&mut disk) {
+    // Ask the disk where the journal belongs. On a partitioned image this
+    // finds the partition the builder reserved; on a bare scratch disk there
+    // is no table, and the whole device is ours.
+    match i3ml_gpt::find(&mut disk, &JOURNAL_PARTITION) {
+        Ok(partition) => {
+            let _ = writeln!(
+                out,
+                "gpt: journal partition found — sectors {}..{} ({} MiB)",
+                partition.first_lba,
+                partition.last_lba,
+                partition.sector_count() * 512 / (1024 * 1024)
+            );
+            // The last sector of our partition is scratch: the journal stops
+            // one short of it, so proving the disk round-trips cannot
+            // overwrite a record — and cannot reach the backup partition
+            // table beyond the partition either.
+            let mut scratch = partition;
+            scratch.first_lba = partition.last_lba;
+            round_trip(&mut Window::new(&mut disk, &scratch), out);
+
+            let mut usable = partition;
+            usable.last_lba = partition.last_lba.saturating_sub(1);
+            let mut window = Window::new(&mut disk, &usable);
+            journal(&mut window, out);
+        }
+        Err(fault) => {
+            let _ = writeln!(out, "gpt: no journal partition ({fault:?}) — using the whole disk");
+            round_trip(&mut Tail { inner: &mut disk }, out);
+            journal(&mut disk, out);
+        }
+    }
+}
+
+/// A one-sector view of the very end of a device, for the round-trip check on
+/// a disk with no partition table to tell us what is ours.
+struct Tail<'a> {
+    inner: &'a mut dyn Sectors,
+}
+
+impl Sectors for Tail<'_> {
+    fn sector_count(&self) -> u64 {
+        1
+    }
+    fn read(&mut self, sector: u64, out: &mut [u8]) -> bool {
+        let last = self.inner.sector_count();
+        sector == 0 && self.inner.read(last, out)
+    }
+    fn write(&mut self, sector: u64, data: &[u8]) -> bool {
+        let last = self.inner.sector_count();
+        sector == 0 && self.inner.write(last, data)
+    }
+    fn flush(&mut self) -> bool {
+        self.inner.flush()
+    }
+}
+
+/// Write a sector, read it back, compare. Until this works, nothing the
+/// kernel remembers outlives a reboot — so it is checked every boot rather
+/// than assumed from the last one.
+fn round_trip(storage: &mut dyn Sectors, out: &mut SerialWriter) {
+    let mut written = [0u8; 512];
+    let greeting = b"i3mlOS scratch sector -- i3mel";
+    written[..greeting.len()].copy_from_slice(greeting);
+
+    if !storage.write(0, &written) {
+        let _ = writeln!(out, "virtio-blk: write REFUSED");
+        return;
+    }
+    let mut read_back = [0u8; 512];
+    if !storage.read(0, &mut read_back) {
+        let _ = writeln!(out, "virtio-blk: read REFUSED");
+        return;
+    }
+    if read_back[..greeting.len()] == greeting[..] {
+        let _ = writeln!(out, "virtio-blk: wrote and read back a sector — storage works");
+    } else {
+        let _ = writeln!(out, "virtio-blk: READ BACK MISMATCH");
+    }
+    if storage.flush() {
+        let _ = writeln!(out, "virtio-blk: flushed — the write is on the disk, not in a promise");
+    }
+}
+
+/// Open (or start) the log on whatever storage it was given.
+fn journal(disk: &mut dyn Sectors, out: &mut SerialWriter) {
+    let mut journal = match Journal::open(disk) {
         Ok(journal) => {
             let _ = writeln!(
                 out,
@@ -76,7 +169,7 @@ pub fn run(device: Block, out: &mut SerialWriter) {
             if journal.count() > 0 {
                 // Show the machine remembering something specific, not just a
                 // number: the first thing it did last time.
-                if let Ok(first) = journal.read(&mut disk, 0) {
+                if let Ok(first) = journal.read(disk, 0) {
                     let _ = writeln!(
                         out,
                         "  earliest surviving entry: #{} agent={} \"{}\"",
@@ -90,7 +183,7 @@ pub fn run(device: Block, out: &mut SerialWriter) {
         }
         Err(Fault::NoJournal) => {
             let _ = writeln!(out, "sijil: no journal on this disk — starting one");
-            match Journal::create(&mut disk) {
+            match Journal::create(disk) {
                 Ok(journal) => journal,
                 Err(_) => {
                     let _ = writeln!(out, "sijil: could not create the journal");
@@ -120,13 +213,13 @@ pub fn run(device: Block, out: &mut SerialWriter) {
             entry.detail,
             entry.label.as_str(),
         );
-        match journal.append(&mut disk, &record) {
+        match journal.append(disk, &record) {
             Ok(()) => written += 1,
             Err(Fault::Full) => full = true,
             Err(_) => full = true,
         }
     });
-    journal.flush(&mut disk);
+    journal.flush(disk);
 
     let _ = writeln!(
         out,

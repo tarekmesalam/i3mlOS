@@ -20,3 +20,10 @@ jobs:
         run: cargo test -p i3ml-wasm -p i3ml-sha256 -p i3ml-journal
       - name: Boot the kernel in QEMU and assert the serial hello
         run: cargo xtask test
+      - name: Build the distributable image and boot it twice
+        run: cargo xtask disk-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: i3mlos-image
+          path: target/i3mlos.img
+          compression-level: 9

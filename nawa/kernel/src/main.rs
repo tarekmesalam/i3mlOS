@@ -295,54 +295,22 @@ fn bring_up_devices(out: &mut SerialWriter) {
     }
 
     match nawa_virtio::block::Block::open() {
-        Some(mut disk) => {
+        Some(disk) => {
             let _ = writeln!(
                 out,
                 "virtio-blk: {} sectors ({} MiB)",
                 disk.sectors,
                 disk.sectors * 512 / (1024 * 1024)
             );
-            // Write a sector, read it back, and compare. Until this round
-            // trip works, nothing the kernel remembers outlives a reboot.
-            //
-            // The LAST sector, not the first: the journal owns the disk from
-            // sector 0 upward, and a scratch write over its superblock is
-            // exactly how a record silently stops surviving reboots.
-            let scratch = disk.sectors.saturating_sub(1);
-            let mut written = [0u8; nawa_virtio::block::SECTOR_SIZE];
-            let greeting = b"i3mlOS scratch sector -- i3mel";
-            written[..greeting.len()].copy_from_slice(greeting);
-            written[greeting.len()] = boot_marker();
-
-            if !disk.write_sector(scratch, &written) {
-                let _ = writeln!(out, "virtio-blk: write REFUSED");
-                return;
-            }
-            let mut read_back = [0u8; nawa_virtio::block::SECTOR_SIZE];
-            if !disk.read_sector(scratch, &mut read_back) {
-                let _ = writeln!(out, "virtio-blk: read REFUSED");
-                return;
-            }
-            if read_back[..greeting.len()] == greeting[..] {
-                let _ = writeln!(out, "virtio-blk: wrote and read back a sector — storage works");
-            } else {
-                let _ = writeln!(out, "virtio-blk: READ BACK MISMATCH");
-            }
-            if disk.flush() {
-                let _ = writeln!(out, "virtio-blk: flushed — the write is on the disk, not in a promise");
-            }
+            // Everything else the disk is for — proving it round-trips,
+            // finding our partition, keeping the journal — happens where the
+            // kernel knows which sectors are its own to touch.
             persist::run(disk, out);
         }
         None => {
             let _ = writeln!(out, "virtio-blk: absent");
         }
     }
-}
-
-/// A byte that differs per boot, so a sector written now is distinguishable
-/// from one written last time.
-fn boot_marker() -> u8 {
-    (apic::ticks() & 0xff) as u8
 }
 
 /// Run an agent that is a WebAssembly module. Two things are proven here:

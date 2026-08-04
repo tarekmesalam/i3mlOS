@@ -26,12 +26,57 @@
 
 **VM-first ولسنين VirtIO-only** — QEMU/Firecracker هما الهاردوير، فالـ drivers بتنزل من آلاف لدستة؛ والأجهزة الحقيقية في المرحلة الأخيرة. قاعدة النقاء: كود الغير مسموح في أدوات البناء والاختبار — **ممنوع في الصورة اللي بتتشحن**.
 
+## Try it | جرّبه
+
+One command builds a bootable disk image and runs it. Nothing but Rust and
+QEMU is needed — the GPT and the FAT32 filesystem are built by the repo's own
+tooling, so there is no `mkfs`, no `sudo`, and no Linux requirement.
+
+بأمر واحد تبني صورة قرص قابلة للإقلاع وتشغّلها. مش محتاج غير Rust وQEMU — جدول
+الأقسام ونظام الملفات بيتبنوا بأدوات المشروع نفسه.
+
+```bash
+cargo xtask boot --gui
+```
+
+Or build the image and run it however you like:
+
+```bash
+cargo xtask disk
+```
+
+That writes `target/i3mlos.img` — a GPT disk with an EFI system partition the
+firmware boots and a second partition the kernel keeps its journal in. Boot it
+with any UEFI-capable VM:
+
+```bash
+qemu-system-x86_64 -machine q35 -cpu max -m 256M -serial stdio \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+  -drive if=none,id=i3mlos,format=raw,file=target/i3mlos.img \
+  -device virtio-blk-pci,drive=i3mlos -device virtio-rng-pci
+```
+
+Boot it twice: the second boot recovers and verifies the journal the first one
+wrote. That is the point.
+
 ## Status | الحالة
 
-🟢 **M0 complete.** The kernel boots on QEMU/OVMF, leaves the firmware behind
-(`ExitBootServices`), runs on its own GDT/TSS/IDT with exception handlers,
-manages memory with its own frame allocator and heap, and paints its boot
-screen — CI proves every step on every commit.
+🟢 **Six milestones in, and every claim below is asserted by CI on every
+commit** — a QEMU boot test on two CPU models, then a rebuild of the
+distributable image and two more boots of it.
+
+| | What works |
+|---|---|
+| **M0** | Boots as a UEFI application, leaves the firmware (`ExitBootServices`), own GDT/TSS/IDT, frame allocator and heap, boot screen |
+| **M1** | A heartbeat (APIC), and **agents as the schedulable unit** — goal, lineage, capabilities, budget — through the AMAN gate, recorded in SIJIL, with consent for the irreversible and budgets that suspend rather than overspend |
+| **M2** | Own page tables and **ring 3**: untrusted code cannot reach kernel memory, and the CPU is what refuses it |
+| **M3** | An agent can be a **WebAssembly module**, bounded by fuel, its **imports resolved against capabilities before it runs** |
+| **M4** | **Real hardware**: PCI, the virtio 1.0 transport, entropy and a disk |
+| **M5** | **The journal outlives the machine** — SHA-256 and a hash chain, verified before it is trusted |
+| **M6** | Ships as **one bootable disk image**, GPT and FAT32 built by this repo's own tooling |
+
+What it deliberately cannot do yet is listed in
+[WHAT-IT-CANT-DO-YET.md](WHAT-IT-CANT-DO-YET.md), and kept honest.
 
 <p align="center">
   <img src="assets/bootscreen.png" alt="i3mlOS boot screen: the three-petal mark above إعمل" width="640">

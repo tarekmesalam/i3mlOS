@@ -8,6 +8,10 @@
 //!   run [--gui]    boot the image in QEMU (serial on stdio)
 //!   test           headless boot; assert serial hello + clean exit status
 //!   check          enforce the framekernel rule: `unsafe` only in nawa/core
+//!   disk           build target/i3mlos.img — the distributable disk image
+//!   boot [--gui]   boot that image, the way anyone else would
+
+mod disk;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -46,6 +50,12 @@ const MARKERS: [&str; 25] = [
     "chain tip",                              // hash-chained, not just written
 ];
 
+/// True of the distributable image specifically: it must boot from the EFI
+/// partition the builder wrote, and find the journal partition by its type
+/// rather than by an assumed offset.
+const IMAGE_MARKERS: [&str; 3] =
+    [HELLO_LINE, "gpt: journal partition found", "entries persisted this boot"];
+
 /// Only true on a boot that is not the first: the journal must be found,
 /// verified, and recovered. A record that does not survive the machine is
 /// not a record.
@@ -64,8 +74,11 @@ fn main() {
         "run" => run(args.iter().any(|a| a == "--gui")),
         "test" => test(),
         "check" => check(),
+        "disk" => build_disk().map(|_| ()),
+        "boot" => boot_disk(args.iter().any(|a| a == "--gui"), false).map(|_| ()),
+        "disk-test" => disk_test(),
         _ => {
-            eprintln!("usage: cargo xtask <build|image|run [--gui]|test|check>");
+            eprintln!("usage: cargo xtask <build|image|run [--gui]|disk|boot [--gui]|test|check>");
             std::process::exit(2);
         }
     };
@@ -181,6 +194,86 @@ fn qemu_command_with_cpu(
     Ok(qemu)
 }
 
+/// Build the image someone else can boot: one file, GPT-partitioned, with the
+/// kernel on an EFI system partition and a partition for its journal.
+fn build_disk() -> Result<PathBuf, String> {
+    build()?;
+    let root = repo_root();
+    let kernel = root.join("target").join(KERNEL_TARGET).join("release").join("nawa.efi");
+    let bytes = fs::read(&kernel).map_err(|error| format!("reading the kernel: {error}"))?;
+    let output = root.join("target").join("i3mlos.img");
+    disk::build(&output, &bytes, 128)?;
+    println!("disk image: {} ({} MiB)", output.display(), 128);
+    Ok(output)
+}
+
+/// Boot the distributable image exactly as a stranger would: one file, no
+/// build tree, nothing from this repository mounted into it.
+fn boot_disk(gui: bool, testing: bool) -> Result<String, String> {
+    let image = repo_root().join("target").join("i3mlos.img");
+    if !image.exists() {
+        build_disk()?;
+    }
+    let firmware = find_firmware()?;
+    let vars_copy = repo_root().join("target").join("ovmf-vars-boot.fd");
+    fs::copy(&firmware.vars, &vars_copy).map_err(|error| format!("copy vars: {error}"))?;
+
+    let mut qemu = Command::new("qemu-system-x86_64");
+    qemu.args(["-machine", "q35", "-cpu", "max", "-m", "256M", "-nic", "none", "-serial", "stdio"]);
+    qemu.arg("-drive")
+        .arg(format!("if=pflash,format=raw,readonly=on,file={}", firmware.code.display()));
+    qemu.arg("-drive").arg(format!("if=pflash,format=raw,file={}", vars_copy.display()));
+    qemu.arg("-drive").arg(format!("if=none,id=i3mlos,format=raw,file={}", image.display()));
+    qemu.args(["-device", "virtio-blk-pci,drive=i3mlos"]);
+    qemu.args(["-device", "virtio-rng-pci"]);
+    if !gui {
+        qemu.args(["-display", "none"]);
+    }
+    if !testing {
+        println!("booting the image — serial follows:");
+        let status = qemu.status().map_err(|error| format!("failed to spawn qemu: {error}"))?;
+        println!("qemu exited: {status}");
+        return Ok(String::new());
+    }
+
+    qemu.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-no-reboot"]);
+    qemu.stdout(Stdio::piped()).stderr(Stdio::inherit()).stdin(Stdio::null());
+    let (serial, status) = capture(qemu)?;
+    if status.code() != Some(QEMU_SUCCESS_STATUS) {
+        return Err(format!("image boot: expected exit {QEMU_SUCCESS_STATUS}, got {status}"));
+    }
+    Ok(serial)
+}
+
+/// The artifact test: build the image a stranger would download, boot it, and
+/// boot it again. Nothing from this build tree is mounted into it — if the
+/// image is wrong, this is where that shows.
+fn disk_test() -> Result<(), String> {
+    let image = repo_root().join("target").join("i3mlos.img");
+    let _ = fs::remove_file(&image);
+    build_disk()?;
+
+    println!("=== image boot 1: does the artifact boot at all? ===");
+    let first = boot_disk(false, true)?;
+    for marker in IMAGE_MARKERS {
+        if !first.contains(marker) {
+            return Err(format!("image boot 1: serial output missing \"{marker}\""));
+        }
+    }
+    println!("  ok: booted from its own EFI partition and found its journal partition");
+
+    println!("=== image boot 2: does its journal survive? ===");
+    let second = boot_disk(false, true)?;
+    for marker in REBOOT_MARKERS {
+        if !second.contains(marker) {
+            return Err(format!("image boot 2: serial output missing \"{marker}\""));
+        }
+    }
+    println!("  ok: the journal in the image outlived the machine");
+    println!("IMAGE TEST OK");
+    Ok(())
+}
+
 fn run(gui: bool) -> Result<(), String> {
     let esp = image()?;
     let mut qemu = qemu_command(&esp, !gui, false)?;
@@ -226,7 +319,22 @@ fn test() -> Result<(), String> {
 fn boot_once(esp: &Path, cpu: &str) -> Result<String, String> {
     let mut qemu = qemu_command_with_cpu(esp, true, true, cpu)?;
     qemu.stdout(Stdio::piped()).stderr(Stdio::inherit()).stdin(Stdio::null());
+    let (serial, status) = capture(qemu)?;
 
+    println!("--- serial ---");
+    print!("{serial}");
+    println!("--------------");
+
+    if status.code() != Some(QEMU_SUCCESS_STATUS) {
+        return Err(format!("[{cpu}] expected qemu exit status {QEMU_SUCCESS_STATUS}, got {status}"));
+    }
+    println!("  ok: clean exit ({QEMU_SUCCESS_STATUS})");
+    Ok(serial)
+}
+
+/// Run QEMU to completion, returning everything it said and how it ended.
+/// A machine that will not stop is killed rather than waited on forever.
+fn capture(mut qemu: Command) -> Result<(String, std::process::ExitStatus), String> {
     let start = Instant::now();
     let mut child = qemu.spawn().map_err(|e| format!("failed to spawn qemu: {e}"))?;
     let mut stdout = child.stdout.take().expect("stdout was piped");
@@ -248,16 +356,7 @@ fn boot_once(esp: &Path, cpu: &str) -> Result<String, String> {
         }
     };
     let serial = reader.join().unwrap_or_default();
-
-    println!("--- serial ---");
-    print!("{serial}");
-    println!("--------------");
-
-    if status.code() != Some(QEMU_SUCCESS_STATUS) {
-        return Err(format!("[{cpu}] expected qemu exit status {QEMU_SUCCESS_STATUS}, got {status}"));
-    }
-    println!("  ok: clean exit ({QEMU_SUCCESS_STATUS})");
-    Ok(serial)
+    Ok((serial, status))
 }
 
 /// Framekernel rule: unsafe *operations* may appear only under nawa/core.

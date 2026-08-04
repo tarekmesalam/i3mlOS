@@ -23,5 +23,7 @@ pub static MODULE: [u8; 124] = [
 ];
 
 /// The greeting the module journals — the same marker the ring 3 resident
-/// uses, so the two paths are comparable in the log.
+/// uses, so the two paths are comparable in the log. Read by the host
+/// tests in libs/wasm/tests/agent_module.rs.
+#[allow(dead_code)]
 pub const GREETING: u64 = 0x1391;

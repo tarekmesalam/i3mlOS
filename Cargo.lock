@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "i3ml-gpt"
+version = "0.0.1"
+dependencies = [
+ "i3ml-journal",
+]
+
+[[package]]
 name = "i3ml-journal"
 version = "0.0.1"
 dependencies = [
@@ -42,6 +49,7 @@ dependencies = [
 name = "nawa-kernel"
 version = "0.0.1"
 dependencies = [
+ "i3ml-gpt",
  "i3ml-journal",
  "i3ml-wasm",
  "nawa-aman",
