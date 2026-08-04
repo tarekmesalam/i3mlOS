@@ -54,7 +54,11 @@ impl Block {
         let (queue, doorbell) = transport.setup_queue(0, 8)?;
         transport.ready();
         let scratch = mem::allocate_frames(1)? as u64;
-        let sectors = transport.config64(CONFIG_CAPACITY);
+        // A device's own idea of its size is an input, not a fact. Anything
+        // beyond this is a lie or a bug, and either way the kernel should not
+        // size its work from it.
+        const MAX_PLAUSIBLE_SECTORS: u64 = 1 << 40; // 512 TiB
+        let sectors = transport.config64(CONFIG_CAPACITY).min(MAX_PLAUSIBLE_SECTORS);
         Some(Block { transport, queue, doorbell, scratch, sectors })
     }
 
@@ -71,11 +75,11 @@ impl Block {
         ];
         let chain: &[(u64, u32, bool)] =
             if payload_length == 0 { &[chain[0], chain[2]] } else { &chain };
-        if self.queue.submit(chain).is_none() {
+        let Some(head) = self.queue.submit(chain) else {
             return false;
-        }
+        };
         self.transport.notify(self.doorbell, 0);
-        if self.queue.wait(50_000_000).is_none() {
+        if self.queue.wait_for(head, 50_000_000).is_none() {
             return false;
         }
         mmio::read8(self.scratch + STATUS_OFFSET) == STATUS_OK

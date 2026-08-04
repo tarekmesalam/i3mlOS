@@ -47,6 +47,14 @@ pub struct Queue {
     next_descriptor: u16,
     /// Where we last saw the device's used index.
     last_used: u16,
+    /// Set when a request was abandoned before the device answered.
+    ///
+    /// After a timeout the device still owns descriptors we handed it, and it
+    /// may answer later. Reusing those slots would let it write into a newer
+    /// request's buffers, and accepting the late completion would attribute
+    /// one request's result to another. Neither is a risk worth taking for a
+    /// disk, so the queue fails closed and says so.
+    broken: bool,
 }
 
 const MAX_QUEUE_SIZE: u16 = 128;
@@ -64,7 +72,15 @@ impl Queue {
         for frame in [descriptors, available, used] {
             mmio::zero(frame, PAGE_SIZE);
         }
-        Some(Queue { size, descriptors, available, used, next_descriptor: 0, last_used: 0 })
+        Some(Queue {
+            size,
+            descriptors,
+            available,
+            used,
+            next_descriptor: 0,
+            last_used: 0,
+            broken: false,
+        })
     }
 
     pub fn descriptor_address(&self) -> u64 {
@@ -110,7 +126,7 @@ impl Queue {
     /// Publish a chain of buffers. Returns the head descriptor index, which
     /// is what the device will name when it is finished.
     pub fn submit(&mut self, buffers: &[(u64, u32, bool)]) -> Option<u16> {
-        if buffers.is_empty() || buffers.len() > self.size as usize {
+        if self.broken || buffers.is_empty() || buffers.len() > self.size as usize {
             return None;
         }
         let head = self.next_descriptor;
@@ -157,15 +173,33 @@ impl Queue {
         Some((element.id as u16, element.length))
     }
 
-    /// Spin until the device completes something, or until `attempts` runs
-    /// out. A device that never answers must not become a dead machine.
-    pub fn wait(&mut self, attempts: u64) -> Option<(u16, u32)> {
+    /// Spin until **this** request completes, or until `attempts` runs out.
+    ///
+    /// The head descriptor is checked, not assumed: a used entry names the
+    /// request it belongs to, and a driver that ignores that name will
+    /// eventually hand one request's answer to another. A device that never
+    /// answers must not become a dead machine either — so the wait is bounded,
+    /// and giving up marks the queue broken rather than pretending the
+    /// outstanding request went away.
+    pub fn wait_for(&mut self, head: u16, attempts: u64) -> Option<u32> {
         for _ in 0..attempts {
-            if let Some(completion) = self.take_used() {
-                return Some(completion);
+            match self.take_used() {
+                Some((id, length)) if id == head => return Some(length),
+                Some(_) => {
+                    // A completion for something else: the queue is no longer
+                    // in a state this driver can reason about.
+                    self.broken = true;
+                    return None;
+                }
+                None => core::hint::spin_loop(),
             }
-            core::hint::spin_loop();
         }
+        self.broken = true;
         None
+    }
+
+    /// Has this queue been abandoned mid-request?
+    pub fn is_broken(&self) -> bool {
+        self.broken
     }
 }

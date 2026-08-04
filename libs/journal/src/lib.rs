@@ -29,6 +29,15 @@ pub const FIRST_RECORD_SECTOR: u64 = 1;
 
 const MAGIC: [u8; 8] = *b"i3mlSJL1";
 
+/// The most records this build will ever verify, whatever the disk claims
+/// about its own size.
+///
+/// `open` walks the entire chain before trusting it, so the length of that
+/// walk must be a number *we* chose. A device is free to report a capacity
+/// near 2^64; believing it turns verification into an unbounded loop that a
+/// cooperative liar can feed valid records forever.
+pub const MAX_RECORDS: u64 = 1 << 20;
+
 /// Where the storage lives. The kernel implements this over virtio-blk; the
 /// tests implement it over a vector, which is why the format can be trusted
 /// before the driver is.
@@ -272,7 +281,10 @@ impl Journal {
 }
 
 fn record_capacity(sector_count: u64) -> u64 {
-    sector_count.saturating_sub(FIRST_RECORD_SECTOR) * RECORDS_PER_SECTOR as u64
+    sector_count
+        .saturating_sub(FIRST_RECORD_SECTOR)
+        .saturating_mul(RECORDS_PER_SECTOR as u64)
+        .min(MAX_RECORDS)
 }
 
 fn read_record(storage: &mut dyn Sectors, index: u64) -> Result<(Record, [u8; HASH_BYTES]), Fault> {
@@ -391,6 +403,28 @@ mod tests {
     fn an_empty_disk_is_not_mistaken_for_an_empty_log() {
         let mut disk = Ram::new(64);
         assert_eq!(Journal::open(&mut disk).err(), Some(Fault::NoJournal));
+    }
+
+    #[test]
+    fn a_disk_that_lies_about_its_size_cannot_set_the_work() {
+        struct Enormous;
+        impl Sectors for Enormous {
+            fn sector_count(&self) -> u64 {
+                u64::MAX
+            }
+            fn read(&mut self, _sector: u64, _out: &mut [u8]) -> bool {
+                true
+            }
+            fn write(&mut self, _sector: u64, _data: &[u8]) -> bool {
+                true
+            }
+            fn flush(&mut self) -> bool {
+                true
+            }
+        }
+        // Neither wrapped to something small nor believed at face value.
+        let journal = Journal::create(&mut Enormous).unwrap();
+        assert_eq!(journal.capacity(), MAX_RECORDS);
     }
 
     #[test]

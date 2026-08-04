@@ -39,10 +39,13 @@ impl Entropy {
         if wanted == 0 {
             return Some(0);
         }
-        self.queue.submit(&[(self.buffer, wanted, true)])?;
+        let head = self.queue.submit(&[(self.buffer, wanted, true)])?;
         self.transport.notify(self.doorbell, 0);
-        let (_, produced) = self.queue.wait(50_000_000)?;
-        let produced = (produced as usize).min(out.len());
+        let produced = self.queue.wait_for(head, 50_000_000)?;
+        // The device chooses this number; clamp it against what we asked for
+        // as well as the caller's slice, so an inflated length copies nothing
+        // it should not.
+        let produced = (produced as usize).min(wanted as usize).min(out.len());
         mmio::read_into(self.buffer, &mut out[..produced]);
         Some(produced)
     }
