@@ -33,8 +33,15 @@ Honesty page, updated every release. Today the kernel:
   **virtio-rng** for entropy it cannot invent, and **virtio-blk** — it writes
   a sector, reads it back, and flushes it. Device registers are mapped on
   demand, which they must be: a virtio BAR under OVMF sits at 768 GiB.
-- **Cannot:** use the disk for anything yet (there is no filesystem, and
-  SIJIL is still a ring in RAM — persisting it is next), take device
+- **Can (M5):** **keep its journal.** Every boot opens the hash-chained log
+  on disk, verifies every link before trusting a word of it, appends what
+  happened this time, and commits. A record edited or truncated on disk
+  stops verifying and is refused rather than believed. SHA-256 is ours,
+  checked against the published vectors.
+- **Cannot:** survive an attacker who owns the disk and rewrites the whole
+  chain (that needs a signature, and it is a later milestone — the chain
+  detects corruption and tampering-in-place, not a full forgery), store
+  anything but the journal (there is no filesystem yet), take device
   interrupts (drivers poll), drive a network card or a console device,
   run WASM modules in the yard yet (the interpreter is still
   kernel-side; moving it into ring 3 is the next step), checkpoint a running

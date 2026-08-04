@@ -18,7 +18,7 @@ const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const HELLO_LINE: &str = "hello from the i3ml kernel";
 /// Every marker must appear on serial for the boot test to pass. Each one is
 /// a law the kernel claims to enforce, asserted on every commit.
-const MARKERS: [&str; 23] = [
+const MARKERS: [&str; 25] = [
     HELLO_LINE,
     "nawa: exit_boot_services ok",
     "int3: breakpoint handled",
@@ -42,7 +42,15 @@ const MARKERS: [&str; 23] = [
     "virtio device",                          // the kernel finds real hardware
     "bytes of real entropy",                  // randomness it did not invent
     "storage works",                          // and a disk that answers
+    "entries persisted this boot",            // the journal reaches the disk
+    "chain tip",                              // hash-chained, not just written
 ];
+
+/// Only true on a boot that is not the first: the journal must be found,
+/// verified, and recovered. A record that does not survive the machine is
+/// not a record.
+const REBOOT_MARKERS: [&str; 2] =
+    ["entries recovered from disk, chain intact", "earliest surviving entry"];
 /// isa-debug-exit: (0x10 << 1) | 1 — must match nawa_core::qemu::EXIT_SUCCESS.
 const QEMU_SUCCESS_STATUS: i32 = 33;
 const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -184,15 +192,38 @@ fn run(gui: bool) -> Result<(), String> {
 
 fn test() -> Result<(), String> {
     let esp = image()?;
+    // Start from a blank disk so the first boot is genuinely the first.
+    let disk = repo_root().join("target").join("i3mlos-disk.img");
+    let _ = fs::remove_file(&disk);
+
     for (name, cpu) in TEST_CPUS {
         println!("=== boot test: {name} ({cpu}) ===");
-        boot_once(&esp, cpu)?;
+        let serial = boot_once(&esp, cpu)?;
+        for marker in MARKERS {
+            if !serial.contains(marker) {
+                return Err(format!("[{cpu}] serial output missing \"{marker}\""));
+            }
+        }
     }
-    println!("BOOT TEST OK: all {} markers on {} CPU models", MARKERS.len(), TEST_CPUS.len());
+
+    // The reboot test. Everything above ran against a disk that started
+    // empty; this boot must find what the previous ones committed — that is
+    // the whole point of a journal, and it cannot be checked in one run.
+    println!("=== reboot test: does the journal outlive the machine? ===");
+    let serial = boot_once(&esp, TEST_CPUS[0].1)?;
+    for marker in REBOOT_MARKERS {
+        if !serial.contains(marker) {
+            return Err(format!("after reboot, serial output missing \"{marker}\""));
+        }
+    }
+    println!("  ok: the journal was recovered and verified");
+
+    println!("BOOT TEST OK: all {} markers on {} CPU models, plus recovery", MARKERS.len(), TEST_CPUS.len());
     Ok(())
 }
 
-fn boot_once(esp: &Path, cpu: &str) -> Result<(), String> {
+/// Boot once and return everything the kernel said on the serial port.
+fn boot_once(esp: &Path, cpu: &str) -> Result<String, String> {
     let mut qemu = qemu_command_with_cpu(esp, true, true, cpu)?;
     qemu.stdout(Stdio::piped()).stderr(Stdio::inherit()).stdin(Stdio::null());
 
@@ -222,16 +253,11 @@ fn boot_once(esp: &Path, cpu: &str) -> Result<(), String> {
     print!("{serial}");
     println!("--------------");
 
-    for marker in MARKERS {
-        if !serial.contains(marker) {
-            return Err(format!("[{cpu}] serial output missing \"{marker}\""));
-        }
-    }
     if status.code() != Some(QEMU_SUCCESS_STATUS) {
         return Err(format!("[{cpu}] expected qemu exit status {QEMU_SUCCESS_STATUS}, got {status}"));
     }
-    println!("  ok: all {} markers found, clean exit ({QEMU_SUCCESS_STATUS})", MARKERS.len());
-    Ok(())
+    println!("  ok: clean exit ({QEMU_SUCCESS_STATUS})");
+    Ok(serial)
 }
 
 /// Framekernel rule: unsafe *operations* may appear only under nawa/core.

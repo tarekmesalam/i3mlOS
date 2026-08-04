@@ -16,3 +16,4 @@ nawa-aman = { path = "../aman" }
 nawa-gate = { path = "../gate" }
 nawa-virtio = { path = "../virtio" }
 i3ml-wasm = { path = "../../libs/wasm" }
+i3ml-journal = { path = "../../libs/journal" }

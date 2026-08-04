@@ -17,6 +17,6 @@ jobs:
       - name: Framekernel rule — unsafe only in nawa/core
         run: cargo xtask check
       - name: Host tests (libraries are testable off the metal)
-        run: cargo test -p i3ml-wasm
+        run: cargo test -p i3ml-wasm -p i3ml-sha256 -p i3ml-journal
       - name: Boot the kernel in QEMU and assert the serial hello
         run: cargo xtask test

@@ -1,0 +1,9 @@
+[package]
+name = "i3ml-journal"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "The SIJIL on-disk format: fixed records, hash-chained, verifiable"
+
+[dependencies]
+i3ml-sha256 = { path = "../sha256" }
