@@ -17,7 +17,9 @@ extern crate alloc;
 
 mod agents;
 mod banner;
+mod font;
 mod logo;
+mod screen;
 mod resident;
 mod model;
 mod persist;
@@ -93,9 +95,10 @@ fn kmain(boot: BootInfo) -> ! {
     run_the_yard(&mut out);
     run_a_wasm_agent(&mut out);
     bring_up_devices(&mut out);
-    think(&mut out);
+    let thought = think(&mut out);
+    show(&boot, &thought, &mut out);
 
-    serial::write_str("nawa: M7 complete, parking\n");
+    serial::write_str("nawa: M8 complete, parking\n");
     qemu::exit(qemu::EXIT_SUCCESS);
     entry::park()
 }
@@ -263,10 +266,17 @@ fn run_first_agents(out: &mut SerialWriter) {
 /// question, and is charged what the model reported — not what it claimed.
 /// Then the same agent tries the private class, and the answer never leaves
 /// the machine, because the broker has no route for it to leave by.
-fn think(out: &mut SerialWriter) {
+pub struct Thought {
+    pub answered: bool,
+    pub tokens: u64,
+    pub agent: u32,
+}
+
+fn think(out: &mut SerialWriter) -> Thought {
+    let mut thought = Thought { answered: false, tokens: 0, agent: 0 };
     let Some(mut broker) = model::Broker::open() else {
         let _ = writeln!(out, "model: no channel — the machine has nothing to think with");
-        return;
+        return thought;
     };
     let _ = writeln!(out, "model: channel open — a model is a device behind the gate");
 
@@ -277,8 +287,9 @@ fn think(out: &mut SerialWriter) {
         3_000,
         |_| nawa_gate::Progress::Done,
     );
+    thought.agent = agent;
     let Some(arabic) = gate::grant(agent, agents::model_arabic()) else {
-        return;
+        return thought;
     };
 
     let prompt = "Three invoices arrived today: Nile Freight 4200 EGP, Cairo Cloud 950 EGP, Delta Print 1300 EGP. Two are overdue.";
@@ -286,15 +297,27 @@ fn think(out: &mut SerialWriter) {
         Ok(answer) => {
             let _ = writeln!(out, "model: answered in {} tokens", answer.tokens);
             let _ = writeln!(out, "  {}", answer.text());
+            thought.answered = true;
+            thought.tokens = answer.tokens;
         }
         Err(denied) => {
             let _ = writeln!(out, "model: refused — {denied:?}");
         }
     }
 
+    // Having thought, the agent wants to act — and sending is irreversible,
+    // so it asks. The request is deliberately left unanswered: the screen's
+    // job is to show a machine waiting for its owner, which is the whole
+    // difference between an agent that acts and an agent that asks.
+    if let Some(send) = gate::grant(agent, agents::root_send()) {
+        if gate::invoke(agent, send).is_err() {
+            let _ = gate::request_approval(agent, send, "email the Arabic summary to accounts");
+        }
+    }
+
     // The residency law, demonstrated rather than described.
     let Some(private) = gate::grant(agent, agents::model_private()) else {
-        return;
+        return thought;
     };
     match broker.ask(agent, private, "My health records say I have hypertension.") {
         Ok(answer) => {
@@ -319,6 +342,114 @@ fn think(out: &mut SerialWriter) {
         "model: {} call(s), {} kept local — the machine thought, and the record knows what it cost",
         broker.calls, broker.kept_local
     );
+    thought
+}
+
+/// Put the whole account on the screen: the mark, what happened, what it
+/// cost, and — framed — what the machine is waiting for permission to do.
+///
+/// This is the difference between a demo and an operating system. A shell
+/// shows a prompt; this shows the machine giving an account of itself to the
+/// person it belongs to.
+fn show(boot: &BootInfo, thought: &Thought, out: &mut SerialWriter) {
+    let Some(framebuffer) = boot.framebuffer else { return };
+    let mut display = screen::Screen::new(framebuffer);
+
+    let mark_left = (display.width().saturating_sub(logo::MARK_WIDTH)) / 2;
+    for petal in logo::mark() {
+        display.blit(&petal.bitmap, mark_left + petal.dx, 40 + petal.dy, petal.color);
+    }
+    let art = banner::banner();
+    display.blit_centered(&art, 40 + logo::MARK_HEIGHT + 16, 1, screen::INK);
+    display.set_y(40 + logo::MARK_HEIGHT + 16 + art.height + 36);
+
+    display.line("the machine's account of itself", screen::DIM);
+    display.rule(screen::ACCENT);
+
+    let mut buffer = [0u8; 24];
+    for agent in gate::summaries() {
+        let y = display.y();
+        let mut cursor = display.text_at("agent ", display.left, y, screen::DIM);
+        cursor = display.text_at(
+            screen::format_number(agent.id as u64, &mut buffer),
+            cursor,
+            y,
+            screen::ACCENT,
+        );
+        cursor = display.text_at("  ", cursor, y, screen::DIM);
+        cursor = display.text_at(agent.goal.as_str(), cursor, y, screen::INK);
+        cursor = display.text_at("  [", cursor, y, screen::DIM);
+        let (state, colour) = match agent.state {
+            State::Finished => ("done", screen::DIM),
+            State::Suspended => ("suspended: out of budget", screen::WARN),
+            State::AwaitingConsent => ("waiting for you", screen::WARN),
+            State::Killed => ("stopped", screen::WARN),
+            State::Runnable => ("running", screen::DIM),
+        };
+        cursor = display.text_at(state, cursor, y, colour);
+        cursor = display.text_at("]  spent ", cursor, y, screen::DIM);
+        cursor = display.text_at(
+            screen::format_number(agent.spent_micro_dollars, &mut buffer),
+            cursor,
+            y,
+            screen::INK,
+        );
+        cursor = display.text_at("/", cursor, y, screen::DIM);
+        cursor = display.text_at(
+            screen::format_number(agent.budget_micro_dollars, &mut buffer),
+            cursor,
+            y,
+            screen::DIM,
+        );
+        display.text_at(" micro-dollars", cursor, y, screen::DIM);
+        display.blank(font::CELL_HEIGHT + 4);
+    }
+
+    display.blank(8);
+    if thought.answered {
+        let y = display.y();
+        let mut cursor = display.text_at("a model answered agent ", display.left, y, screen::DIM);
+        cursor = display.text_at(
+            screen::format_number(thought.agent as u64, &mut buffer),
+            cursor,
+            y,
+            screen::ACCENT,
+        );
+        cursor = display.text_at(" in ", cursor, y, screen::DIM);
+        cursor = display.text_at(
+            screen::format_number(thought.tokens, &mut buffer),
+            cursor,
+            y,
+            screen::INK,
+        );
+        display.text_at(
+            " tokens -- charged by the kernel, not self-reported",
+            cursor,
+            y,
+            screen::DIM,
+        );
+        display.blank(font::CELL_HEIGHT + 4);
+    }
+    let y = display.y();
+    let cursor = display.text_at("journal: ", display.left, y, screen::DIM);
+    let cursor = display.text_at(
+        screen::format_number(sijil::written() as u64, &mut buffer),
+        cursor,
+        y,
+        screen::INK,
+    );
+    display.text_at(" entries this boot, hash-chained on disk", cursor, y, screen::DIM);
+    display.blank(font::CELL_HEIGHT + 20);
+
+    // The question, last and framed.
+    let pending = gate::pending_approvals();
+    if let Some(request) = pending.first() {
+        display.consent_card(request.what.as_str(), request.note.as_str(), request.agent);
+    } else {
+        display.line("nothing is waiting for you.", screen::DIM);
+    }
+
+    let _ = writeln!(out, "screen: the account is on the framebuffer, not just in a log");
 }
 
 /// The first real hardware i3mlOS drives. Two devices, chosen for what they

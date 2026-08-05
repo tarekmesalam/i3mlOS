@@ -74,16 +74,24 @@ distributable image and two more boots of it.
 | **M4** | **Real hardware**: PCI, the virtio 1.0 transport, entropy and a disk |
 | **M5** | **The journal outlives the machine** — SHA-256 and a hash chain, verified before it is trusted |
 | **M6** | Ships as **one bootable disk image**, GPT and FAT32 built by this repo's own tooling |
+| **M8** | **The screen is the interface** — the machine boots into an account of itself and the question it is waiting on, drawn with a from-scratch bitmap font |
 | **M7** | **The machine thinks**: a model is a device behind the gate — capability, budget charged from the model's own token count, journal, and a private class with no route off the machine |
 
 What it deliberately cannot do yet is listed in
 [WHAT-IT-CANT-DO-YET.md](WHAT-IT-CANT-DO-YET.md), and kept honest.
 
 <p align="center">
-  <img src="assets/bootscreen.png" alt="i3mlOS boot screen: the three-petal mark above إعمل" width="640">
+  <img src="assets/account-screen.png" alt="i3mlOS: the machine's account of itself, with a consent card waiting" width="820">
 </p>
 
-<p align="center"><em>The actual framebuffer of the NAWA kernel, drawn by its own code — no firmware, no Linux, no libraries.</em></p>
+<p align="center"><em>Not a shell. This is what i3mlOS boots into: every agent it ran, what
+each one spent, that a model answered and was charged by the kernel, how much of
+the journal is on disk — and, framed, the one thing it is waiting for you to
+decide. The actual framebuffer, drawn by the kernel's own code.</em></p>
+
+<p align="center"><em>مش سطر أوامر — ده اللي i3mlOS بيقلع عليه: كل agent اشتغل، وصرف كام،
+وإن نموذج رد والنواة هي اللي حاسبته، وقد إيه من السجل على القرص — وفي إطار،
+الحاجة الوحيدة اللي مستنية قرارك.</em></p>
 
 ## Documents | المستندات
 

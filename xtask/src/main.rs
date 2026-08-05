@@ -22,7 +22,7 @@ const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const HELLO_LINE: &str = "hello from the i3ml kernel";
 /// Every marker must appear on serial for the boot test to pass. Each one is
 /// a law the kernel claims to enforce, asserted on every commit.
-const MARKERS: [&str; 28] = [
+const MARKERS: [&str; 29] = [
     HELLO_LINE,
     "nawa: exit_boot_services ok",
     "int3: breakpoint handled",
@@ -51,6 +51,7 @@ const MARKERS: [&str; 28] = [
     "a model is a device behind the gate",     // the channel belongs to the kernel
     "model: answered in",                      // and a model actually answered
     "private class stayed on this machine",    // residency by routing, not by policy
+    "the account is on the framebuffer",       // and a person can read all of it
 ];
 
 /// True of the distributable image specifically: it must boot from the EFI

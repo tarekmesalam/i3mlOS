@@ -51,7 +51,14 @@ Honesty page, updated every release. Today the kernel:
   **private** class has no route off the machine at all — residency enforced
   by not routing rather than by policy. The host relay is where anything
   vendor-shaped lives, so the kernel never holds a key.
-- **Cannot:** run a model locally (the private class answers honestly that
+- **Can (M8):** **show a person what it did**, on the framebuffer: every
+  agent and its state, what each spent, that a model answered and what the
+  kernel charged for it, how much of the journal is on disk — and, framed
+  and last, the consent request it is waiting on. An 8x16 bitmap font
+  rendered at build time; a real glyph pipeline is a later milestone.
+- **Cannot:** accept an answer *from* the screen (there is no keyboard driver
+  yet, so the consent card is shown, not clicked), render Arabic text beyond
+  the pre-shaped banner, run a model locally (the private class answers honestly that
   there is none yet), stream a reply, hold a conversation across turns
   (each call stands alone), boot on real hardware (this is a VM image: virtio devices, no
   bare-metal drivers), survive an attacker who owns the disk and rewrites the whole
