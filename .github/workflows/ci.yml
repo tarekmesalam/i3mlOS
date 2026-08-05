@@ -20,6 +20,9 @@ jobs:
         run: cargo test -p i3ml-wasm -p i3ml-sha256 -p i3ml-journal
       - name: Boot the kernel in QEMU and assert the serial hello
         run: cargo xtask test
+        # The model relay is started by the test itself and answers
+        # deterministically unless a real endpoint is configured, so this
+        # exercises the whole model path with no network and no secret.
       - name: Build the distributable image and boot it twice
         run: cargo xtask disk-test
       - uses: actions/upload-artifact@v4

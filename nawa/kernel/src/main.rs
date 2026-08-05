@@ -19,6 +19,7 @@ mod agents;
 mod banner;
 mod logo;
 mod resident;
+mod model;
 mod persist;
 mod tool;
 mod toolmod;
@@ -92,8 +93,9 @@ fn kmain(boot: BootInfo) -> ! {
     run_the_yard(&mut out);
     run_a_wasm_agent(&mut out);
     bring_up_devices(&mut out);
+    think(&mut out);
 
-    serial::write_str("nawa: M5 complete, parking\n");
+    serial::write_str("nawa: M7 complete, parking\n");
     qemu::exit(qemu::EXIT_SUCCESS);
     entry::park()
 }
@@ -253,6 +255,70 @@ fn run_first_agents(out: &mut SerialWriter) {
         );
     });
     let _ = writeln!(out, "agents: first agent scheduled by an original kernel — i3mel");
+}
+
+/// The moment the machine stops choreographing and starts thinking.
+///
+/// An agent holds a `model:arabic` capability, asks a real model a real
+/// question, and is charged what the model reported — not what it claimed.
+/// Then the same agent tries the private class, and the answer never leaves
+/// the machine, because the broker has no route for it to leave by.
+fn think(out: &mut SerialWriter) {
+    let Some(mut broker) = model::Broker::open() else {
+        let _ = writeln!(out, "model: no channel — the machine has nothing to think with");
+        return;
+    };
+    let _ = writeln!(out, "model: channel open — a model is a device behind the gate");
+
+    let agent = gate::spawn(
+        "summarize the inbox in Arabic",
+        0,
+        Budget::new(5_000, 0),
+        3_000,
+        |_| nawa_gate::Progress::Done,
+    );
+    let Some(arabic) = gate::grant(agent, agents::model_arabic()) else {
+        return;
+    };
+
+    let prompt = "Three invoices arrived today: Nile Freight 4200 EGP, Cairo Cloud 950 EGP, Delta Print 1300 EGP. Two are overdue.";
+    match broker.ask(agent, arabic, prompt) {
+        Ok(answer) => {
+            let _ = writeln!(out, "model: answered in {} tokens", answer.tokens);
+            let _ = writeln!(out, "  {}", answer.text());
+        }
+        Err(denied) => {
+            let _ = writeln!(out, "model: refused — {denied:?}");
+        }
+    }
+
+    // The residency law, demonstrated rather than described.
+    let Some(private) = gate::grant(agent, agents::model_private()) else {
+        return;
+    };
+    match broker.ask(agent, private, "My health records say I have hypertension.") {
+        Ok(answer) => {
+            let _ = writeln!(out, "model: private class stayed on this machine — {}", answer.text());
+        }
+        Err(denied) => {
+            let _ = writeln!(out, "model: private refused — {denied:?}");
+        }
+    }
+
+    for summary in gate::summaries() {
+        if summary.id == agent {
+            let _ = writeln!(
+                out,
+                "model: agent {} spent {}/{} µ$ on thinking — charged by the kernel, not self-reported",
+                summary.id, summary.spent_micro_dollars, summary.budget_micro_dollars
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "model: {} call(s), {} kept local — the machine thought, and the record knows what it cost",
+        broker.calls, broker.kept_local
+    );
 }
 
 /// The first real hardware i3mlOS drives. Two devices, chosen for what they

@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 pub mod block;
+pub mod console;
 pub mod entropy;
 pub mod queue;
 pub mod transport;

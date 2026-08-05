@@ -118,3 +118,8 @@ pub fn sibling_read() -> Authority {
 pub fn model_arabic() -> Authority {
     Authority::Model { class: ModelClass::Arabic }
 }
+
+/// The class with no route off the machine. Not a policy — a routing fact.
+pub fn model_private() -> Authority {
+    Authority::Model { class: ModelClass::Private }
+}

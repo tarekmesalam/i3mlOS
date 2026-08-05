@@ -22,7 +22,7 @@ const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const HELLO_LINE: &str = "hello from the i3ml kernel";
 /// Every marker must appear on serial for the boot test to pass. Each one is
 /// a law the kernel claims to enforce, asserted on every commit.
-const MARKERS: [&str; 25] = [
+const MARKERS: [&str; 28] = [
     HELLO_LINE,
     "nawa: exit_boot_services ok",
     "int3: breakpoint handled",
@@ -48,6 +48,9 @@ const MARKERS: [&str; 25] = [
     "storage works",                          // and a disk that answers
     "entries persisted this boot",            // the journal reaches the disk
     "chain tip",                              // hash-chained, not just written
+    "a model is a device behind the gate",     // the channel belongs to the kernel
+    "model: answered in",                      // and a model actually answered
+    "private class stayed on this machine",    // residency by routing, not by policy
 ];
 
 /// True of the distributable image specifically: it must boot from the EFI
@@ -179,6 +182,22 @@ fn qemu_command_with_cpu(
     // Real devices for the kernel to drive: entropy it cannot invent, and a
     // disk that outlives the boot.
     qemu.args(["-device", "virtio-rng-pci"]);
+    // The model channel: a console port wired to the host relay's socket.
+    // The guest sees a device; the host side is where anything vendor-shaped
+    // lives, and the kernel never holds a key.
+    let socket = repo_root().join("target").join("i3ml-model.sock");
+    // `reconnect-ms` on QEMU 10+, `reconnect` before it; neither is needed
+    // when the relay is already listening, which is how the tests run it.
+    qemu.arg("-chardev").arg(format!("socket,id=model,path={}", socket.display()));
+    // A dedicated port, not the console: the firmware writes to port 0, and
+    // a channel the firmware shares is a channel with someone else's bytes in
+    // it.
+    qemu.args([
+        "-device",
+        "virtio-serial-pci",
+        "-device",
+        "virtserialport,chardev=model,nr=1,name=os.i3ml.model",
+    ]);
     let disk = repo_root().join("target").join("i3mlos-disk.img");
     if !disk.exists() {
         let _ = fs::write(&disk, vec![0u8; 16 * 1024 * 1024]);
@@ -249,6 +268,7 @@ fn boot_disk(gui: bool, testing: bool) -> Result<String, String> {
 /// boot it again. Nothing from this build tree is mounted into it — if the
 /// image is wrong, this is where that shows.
 fn disk_test() -> Result<(), String> {
+    let mut relay = start_relay()?;
     let image = repo_root().join("target").join("i3mlos.img");
     let _ = fs::remove_file(&image);
     build_disk()?;
@@ -270,6 +290,7 @@ fn disk_test() -> Result<(), String> {
         }
     }
     println!("  ok: the journal in the image outlived the machine");
+    let _ = relay.kill();
     println!("IMAGE TEST OK");
     Ok(())
 }
@@ -285,6 +306,9 @@ fn run(gui: bool) -> Result<(), String> {
 
 fn test() -> Result<(), String> {
     let esp = image()?;
+    // The model relay runs for the duration: without it the machine has
+    // nothing to think with, and the test says so rather than skipping it.
+    let mut relay = start_relay()?;
     // Start from a blank disk so the first boot is genuinely the first.
     let disk = repo_root().join("target").join("i3mlos-disk.img");
     let _ = fs::remove_file(&disk);
@@ -311,8 +335,34 @@ fn test() -> Result<(), String> {
     }
     println!("  ok: the journal was recovered and verified");
 
+    let _ = relay.kill();
     println!("BOOT TEST OK: all {} markers on {} CPU models, plus recovery", MARKERS.len(), TEST_CPUS.len());
     Ok(())
+}
+
+/// Start the host end of the model channel. It answers deterministically
+/// unless I3ML_MODEL_ENDPOINT and I3ML_MODEL_KEY are set, so the whole path —
+/// capability, budget, channel, journal — is exercised with no network and no
+/// secret.
+fn start_relay() -> Result<std::process::Child, String> {
+    let root = repo_root();
+    let socket = root.join("target").join("i3ml-model.sock");
+    let _ = fs::remove_file(&socket);
+    let child = Command::new("python3")
+        .arg(root.join("host").join("relay").join("relay.py"))
+        .arg(&socket)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("starting the model relay: {error}"))?;
+    // Wait for it to bind, so QEMU has something to connect to.
+    for _ in 0..200 {
+        if socket.exists() {
+            return Ok(child);
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err("the model relay never bound its socket".into())
 }
 
 /// Boot once and return everything the kernel said on the serial port.

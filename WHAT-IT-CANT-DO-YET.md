@@ -44,7 +44,16 @@ Honesty page, updated every release. Today the kernel:
   offset. The image builder (CRC-32, GPT, FAT32) is part of this repo, so the
   build needs no `mkfs`, no `sudo`, and no Linux. CI builds the image, boots
   it twice, and publishes it as an artifact.
-- **Cannot:** boot on real hardware (this is a VM image: virtio devices, no
+- **Can (M7 — the machine thinks):** reach an **AI model as a device behind
+  the gate**. An agent must hold a `Model` capability of the right class; the
+  tokens it spends are charged by the kernel from what the model reported,
+  not from what the agent claimed; every call is journaled; and the
+  **private** class has no route off the machine at all — residency enforced
+  by not routing rather than by policy. The host relay is where anything
+  vendor-shaped lives, so the kernel never holds a key.
+- **Cannot:** run a model locally (the private class answers honestly that
+  there is none yet), stream a reply, hold a conversation across turns
+  (each call stands alone), boot on real hardware (this is a VM image: virtio devices, no
   bare-metal drivers), survive an attacker who owns the disk and rewrites the whole
   chain (that needs a signature, and it is a later milestone — the chain
   detects corruption and tampering-in-place, not a full forgery), store

@@ -601,6 +601,32 @@ pub fn pending_approvals() -> Vec<ApprovalRequest> {
     })
 }
 
+/// Charge an agent for something already done, in the amount the *kernel*
+/// observed — a model's reported token count, for instance. Kept separate
+/// from `invoke`'s price list because this cost is not knowable in advance,
+/// and an agent must never be the one reporting it.
+pub fn charge(agent: AgentId, micro_dollars: u64) {
+    let exhausted = SUPERVISOR.with(|supervisor| {
+        let supervisor = supervisor.as_mut().expect("gate::init");
+        let Some(found) = supervisor.agents.iter_mut().find(|candidate| candidate.id == agent)
+        else {
+            return false;
+        };
+        // Saturating, then suspend: an overrun is charged in full and the
+        // agent stops, rather than the debt quietly wrapping to nothing.
+        found.budget.spent_micro_dollars =
+            found.budget.spent_micro_dollars.saturating_add(micro_dollars);
+        if found.budget.exhausted() {
+            found.state = State::Suspended;
+            return true;
+        }
+        false
+    });
+    if exhausted {
+        sijil::record(agent, sijil::Event::BudgetExhausted, micro_dollars, "suspended after charge");
+    }
+}
+
 /// Look up one of an agent's capabilities by slot — for the kernel's own
 /// tests and, later, the shell's inspector.
 pub fn capability_of(agent: AgentId, slot: usize) -> Option<Capability> {

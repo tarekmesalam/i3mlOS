@@ -74,6 +74,7 @@ distributable image and two more boots of it.
 | **M4** | **Real hardware**: PCI, the virtio 1.0 transport, entropy and a disk |
 | **M5** | **The journal outlives the machine** — SHA-256 and a hash chain, verified before it is trusted |
 | **M6** | Ships as **one bootable disk image**, GPT and FAT32 built by this repo's own tooling |
+| **M7** | **The machine thinks**: a model is a device behind the gate — capability, budget charged from the model's own token count, journal, and a private class with no route off the machine |
 
 What it deliberately cannot do yet is listed in
 [WHAT-IT-CANT-DO-YET.md](WHAT-IT-CANT-DO-YET.md), and kept honest.
